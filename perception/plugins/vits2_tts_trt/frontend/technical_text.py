@@ -3,15 +3,21 @@
 import re
 
 
+def _edge(pattern: str) -> re.Pattern:
+    """CJK-safe ASCII word boundary (``\\b`` fails next to 中文)."""
+    return re.compile(rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])",
+                      re.IGNORECASE)
+
+
 _PRODUCT_FORMS = (
     (re.compile(r"\bchatgpt\b", re.IGNORECASE), "chat GPT"),
     (re.compile(r"\bopenai\b", re.IGNORECASE), "open AI"),
     (re.compile(r"\bchattts\b", re.IGNORECASE), "chat T T S"),
     (re.compile(r"\bstyletts2\b", re.IGNORECASE), "style T T S二"),
-    (re.compile(r"\brise\s+vgpu\b", re.IGNORECASE), "rise V G P U"),
-    (re.compile(r"\bphanthymotus\b", re.IGNORECASE), "Phanthy Motus"),
-    (re.compile(r"\bhttps\b", re.IGNORECASE), "H T T P S"),
-    (re.compile(r"\bhttp\b", re.IGNORECASE), "H T T P"),
+    (_edge(r"rise\s+vgpu"), "rise V G P U"),
+    (_edge(r"phanthymotus"), "Phanthy Motus"),
+    (_edge(r"https"), "H T T P S"),
+    (_edge(r"http"), "H T T P"),
 )
 
 

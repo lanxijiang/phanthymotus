@@ -13,6 +13,7 @@ from .heteronym import custom_dict, jieba_phrases
 from .fst_tn import FstTextNormalizer
 from .release_paths import frontend_data_dir, tn_cache_dir
 from .technical_text import normalize_technical_lexemes
+from .lexicon_rules import apply_lexeme_rules
 
 
 def _load_phrase_pinyin_data():
@@ -238,7 +239,7 @@ def _remove_redundant_newlines_after_punctuation(text):
 
 def text_normalize(text):
     text = _remove_redundant_newlines_after_punctuation(text)
-    text = _normalizer.normalize(text)
+    text = _normalizer.normalize(apply_lexeme_rules(text))
     text = normalize_technical_lexemes(_post_replace(text))
     text = replace_punctuation(text)
     return text
@@ -252,7 +253,7 @@ def mix_normalize(text: str) -> str:
     """
     from .english import replace_punctuation as en_replace_punct
     text = _remove_redundant_newlines_after_punctuation(text)
-    text = _normalizer.normalize(text)
+    text = _normalizer.normalize(apply_lexeme_rules(text))
     text = normalize_technical_lexemes(_post_replace(text))
     text = en_replace_punct(text)
     return text
