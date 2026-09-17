@@ -306,7 +306,10 @@ eng_dict = get_dict()
 
 CUSTOM_EN_PRONUNCIATIONS = {
     "CUDA": [["K", "UW1", "D", "AH0"]],
-    "HAMI": [["HH", "AE1", "M", "IY0"]],
+    # "HAMi" is spoken as 哈米 (/ˈhɑːmi/), not /ˈhæmi/.
+    "HAMI": [["HH", "AA1", "M", "IY0"]],
+    # OOV for g2p_en, which appended a spurious final T: AH0 JH EH1 N T IH0 K T.
+    "AGENTIC": [["AH0", "JH", "EH1", "N", "T", "IH0", "K"]],
     "IELTS": [["AY1"], ["EH0", "L", "T", "S"]],
 }
 

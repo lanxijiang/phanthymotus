@@ -12,7 +12,10 @@ graph leaves untouched and that ``g2p_en`` then guesses wrongly, e.g.
 
 Boundaries use ASCII lookarounds instead of ``\\b``: CJK characters are ``\\w``
 in Python's Unicode regex, so ``\\b`` never matches between 中文 and an ASCII
-word (``\\bdcu\\b`` fails on ``这是DCU的测试``).
+word (``\\bdcu\\b`` fails on ``这是DCU的测试``). A literal space is *not* enough
+to separate two English tokens — ``unified_g2p`` maps whitespace to a zero-phone
+boundary — so a phrase that needs an audible gap gets a comma, which becomes a
+real pause symbol in the phone stream.
 
 Every entry is deliberately narrow — one release-controlled rewrite per lexeme —
 so training and deployed runtime keep producing identical phonemes.
@@ -25,6 +28,13 @@ def _edge(pattern: str) -> re.Pattern:
     """Match ``pattern`` as a standalone ASCII token, CJK included."""
     return re.compile(rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])", re.IGNORECASE)
 
+
+# 0) Phrase-level rules. These must run before the per-token rules below,
+#    otherwise "Sage AIOS" is already split into letters and never matches.
+_PHRASE_RULES = [
+    # Keep a short pause between the brand and the acronym it introduces.
+    (_edge(r"sage\s+aios"), "Sage, A I O S"),
+]
 
 # 1) Digits that belong to an English phrase must not be verbalized as Chinese.
 _NUMBER_RULES = [
@@ -63,13 +73,17 @@ _FUSED_NAMES = [
     (_edge(r"phanthymovie"), "Phanthy Movie"),
     (_edge(r"phanthycloud"), "Phanthy Cloud"),
     (_edge(r"phancycloud"), "Phancy Cloud"),
+    # Split so that "Router" resolves through CMUdict: /ˈruːtər/, not the
+    # g2p_en guess /ˈraʊtər/ the single fused token produced.
+    (_edge(r"phanrouter"), "Phan Router"),
     (_edge(r"phanclaw"), "Phan Claw"),
 ]
 
-# Order matters: longer alternatives first so a rule cannot consume a prefix of
-# another token (``aios`` before ``ai``, ``vgpu`` before ``gpu``).
+# Order matters: phrase rules first, then longer alternatives before shorter ones
+# (``aios`` before ``ai``, ``vgpu`` before ``gpu``).
 RULES = (
-    _NUMBER_RULES
+    _PHRASE_RULES
+    + _NUMBER_RULES
     + _PROTECTED_TOKENS
     + _LETTER_SPELLED
     + _MIXED_READINGS
