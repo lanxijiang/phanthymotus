@@ -10,12 +10,19 @@ The rules also pin the reading of acronyms and camel-case product names that the
 graph leaves untouched and that ``g2p_en`` then guesses wrongly, e.g.
 ``DCU`` -> ``d uw k`` ("duke"), ``AutoML`` -> ``ao t ah m`` (ML lost).
 
+Separators:
+
+* ``CNCF`` is the one acronym that uses dots between letters (``C.N.C.F``).
+  With a plain space its four letters render as a single continuous 770 ms block
+  with no measurable gap, which is heard as one blur; the dot yields 40-70 ms
+  micro-gaps between letters. Every other acronym keeps the space-separated
+  spelling it already had.
+* A phrase that needs a longer audible gap gets a comma, because ``unified_g2p``
+  maps whitespace to a zero-phone boundary and a comma is a real pause symbol.
+
 Boundaries use ASCII lookarounds instead of ``\\b``: CJK characters are ``\\w``
 in Python's Unicode regex, so ``\\b`` never matches between 中文 and an ASCII
-word (``\\bdcu\\b`` fails on ``这是DCU的测试``). A literal space is *not* enough
-to separate two English tokens — ``unified_g2p`` maps whitespace to a zero-phone
-boundary — so a phrase that needs an audible gap gets a comma, which becomes a
-real pause symbol in the phone stream.
+word (``\\bdcu\\b`` fails on ``这是DCU的测试``).
 
 Every entry is deliberately narrow — one release-controlled rewrite per lexeme —
 so training and deployed runtime keep producing identical phonemes.
@@ -46,12 +53,13 @@ _PROTECTED_TOKENS = [
     (_edge(r"idc"), "I D C"),
 ]
 
-# 3) Acronyms that are read letter by letter.
+# 3) Acronyms that are read letter by letter. CNCF uses dots: space-separated
+#    letters come out as one continuous block (770 ms, no gap).
 _LETTER_SPELLED = [
     (_edge(r"aios"), "A I O S"),
     (_edge(r"dcu"), "D C U"),
     (_edge(r"mlu"), "M L U"),
-    (_edge(r"cncf"), "C N C F"),
+    (_edge(r"cncf"), "C.N.C.F"),
     (_edge(r"xc"), "X C"),
     (_edge(r"vgpu"), "V G P U"),
     (_edge(r"gpu"), "G P U"),
