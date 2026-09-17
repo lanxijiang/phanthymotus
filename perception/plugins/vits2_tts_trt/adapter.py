@@ -17,6 +17,18 @@ CHUNK_BYTES = int(os.getenv("MIX_VITS_CHUNK_BYTES", "3200"))
 PCM_FRAME_MS = CHUNK_BYTES * 1000.0 / (SAMPLE_RATE * 2)
 MAX_CHUNK_TOKENS = int(os.getenv("MIX_VITS_MAX_TEXT_TOKENS", "256"))
 CHUNK_PAUSE_MS = int(os.getenv("MIX_VITS_CHUNK_PAUSE_MS", "0"))
+# Chunk boundaries fall on punctuation, but the model renders a chunk-final
+# comma as a short tail and the next chunk opens with its own silence token, so
+# the same comma measured ~96 ms at a boundary against ~250 ms inside a chunk.
+# CHUNK_PAUSE_TARGET_MS is the intended total pause; the baseline below is what
+# the boundary already contributes, so only the difference is inserted.
+CHUNK_PAUSE_TARGET_MS = {
+    ",": 250, ";": 250, "、": 250, "，": 250, "；": 250,
+    ".": 400, "!": 400, "?": 400, "。": 400, "！": 400, "？": 400,
+    "…": 300,
+}
+CHUNK_PAUSE_FALLBACK_MS = int(os.getenv("MIX_VITS_CHUNK_PAUSE_FALLBACK_MS", "160"))
+CHUNK_PAUSE_BASELINE_MS = int(os.getenv("MIX_VITS_CHUNK_PAUSE_BASELINE_MS", "100"))
 MODEL_CONFIG = os.getenv("MIX_VITS_CONFIG_PATH", "/models/vits2-mix/config.json")
 ENGINE_DIR = os.getenv("MIX_VITS_TRT_ENGINE_DIR", "/models/vits2-mix/engines")
 WARMUP_CASES = (
@@ -26,10 +38,33 @@ WARMUP_CASES = (
 )
 log = logging.getLogger(__name__)
 
+
+def chunk_gap_samples(previous_chunk: str) -> int:
+    """Silence to insert before the next chunk.
+
+    Driven by the trailing punctuation of the previous chunk, minus the ~100 ms
+    the boundary already has from the model's tail plus the next chunk's leading
+    silence token. ``MIX_VITS_CHUNK_PAUSE_MS`` still wins when set, so the old
+    fixed-gap behaviour stays available.
+    """
+    if CHUNK_PAUSE_MS:
+        return SAMPLE_RATE * CHUNK_PAUSE_MS // 1000
+    stripped = previous_chunk.rstrip()
+    target = (
+        CHUNK_PAUSE_TARGET_MS.get(stripped[-1], CHUNK_PAUSE_FALLBACK_MS)
+        if stripped
+        else CHUNK_PAUSE_FALLBACK_MS
+    )
+    return SAMPLE_RATE * max(0, target - CHUNK_PAUSE_BASELINE_MS) // 1000
+
 if CHUNK_BYTES <= 0 or CHUNK_BYTES % 2:
     raise ValueError("MIX_VITS_CHUNK_BYTES must be a positive even number")
 if not 0 <= CHUNK_PAUSE_MS <= 1000:
     raise ValueError("MIX_VITS_CHUNK_PAUSE_MS must be between 0 and 1000")
+if not 0 <= CHUNK_PAUSE_FALLBACK_MS <= 1000:
+    raise ValueError("MIX_VITS_CHUNK_PAUSE_FALLBACK_MS must be between 0 and 1000")
+if not 0 <= CHUNK_PAUSE_BASELINE_MS <= 1000:
+    raise ValueError("MIX_VITS_CHUNK_PAUSE_BASELINE_MS must be between 0 and 1000")
 
 class TTSAdapter(ABC):
     @abstractmethod
@@ -101,8 +136,6 @@ class Vits2TensorRTAdapter(TTSAdapter):
         return b"".join(self.synthesize_stream(text))
 
     def synthesize_stream(self, text: str):
-        pause_samples = SAMPLE_RATE * CHUNK_PAUSE_MS // 1000
-        silence = b"\x00\x00" * pause_samples
         with self._lock:
             # One deterministic latent stream per complete request. Resetting for
             # every text chunk would repeat the same noise prefix at boundaries.
@@ -134,8 +167,12 @@ class Vits2TensorRTAdapter(TTSAdapter):
                         chunk_index,
                         token_count,
                     )
-                    if chunk_index and silence:
-                        yield silence
+                    if chunk_index:
+                        gap = b"\x00\x00" * chunk_gap_samples(
+                            chunks[chunk_index - 1][0]
+                        )
+                        if gap:
+                            yield gap
                     for offset in range(0, len(pcm), CHUNK_BYTES):
                         yield pcm[offset : offset + CHUNK_BYTES]
 
@@ -216,13 +253,13 @@ class Vits2OnnxCpuAdapter(TTSAdapter):
     def synthesize_stream(self, text: str):
         if not text.strip():
             raise ValueError("TTS text must not be empty")
-        pause_samples = SAMPLE_RATE * CHUNK_PAUSE_MS // 1000
-        silence = b"\x00\x00" * pause_samples
         with self._lock:
             chunks = list(self.iter_text_chunks(text))
             for chunk_index, chunk in enumerate(chunks):
-                if chunk_index and silence:
-                    yield silence
+                if chunk_index:
+                    gap = b"\x00\x00" * chunk_gap_samples(chunks[chunk_index - 1])
+                    if gap:
+                        yield gap
                 pcm = self._engine.synthesize(
                     chunk, length_scale=self._length_scale
                 )
