@@ -171,10 +171,28 @@ RULES = (
 )
 
 
+
+
+_QWEN_VERSION_RE = re.compile(
+    r"(?<![A-Za-z0-9])qwen(\d+(?:\.\d+)?)(?![A-Za-z0-9])", re.IGNORECASE
+)
+_CN_DIGITS = "零一二三四五六七八九"
+
+
+def _qwen_version(match) -> str:
+    """Qwen3 -> 千问三, Qwen2.5 -> 千问二点五."""
+    digits = match.group(1)
+    spoken = "".join(
+        _CN_DIGITS[int(ch)] if ch.isdigit() else "点" for ch in digits
+    )
+    return "千问" + spoken
+
+
 def apply_lexeme_rules(text: str) -> str:
     """Rewrite known English lexemes into their intended spoken form."""
     if not text:
         return text
+    text = _QWEN_VERSION_RE.sub(_qwen_version, text)
     for pattern, replacement in RULES:
         text = pattern.sub(replacement, text)
     return text
