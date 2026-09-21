@@ -31,6 +31,7 @@ so training and deployed runtime keep producing identical phonemes.
 """
 
 import re
+from .lexicon_rules_generated import GENERATED_REPLACEMENTS
 
 
 def _edge(pattern: str) -> re.Pattern:
@@ -159,6 +160,7 @@ _MODEL_DIGITS = [
 
 # Order matters: phrase rules first, then longer alternatives before shorter ones
 # (``aios`` before ``ai``, ``vgpu`` before ``gpu``).
+
 RULES = (
     _PHRASE_RULES
     + _CN_NAMES
@@ -171,6 +173,50 @@ RULES = (
 )
 
 
+
+
+# 7) Generated lexeme rules from frontend_res. The complete plain-text
+#    mapping is retained in lexicon_rules_generated.py; only entries
+#    whose spoken form differs from the source term are compiled.
+def _generated_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _generated_pattern(value: str) -> str:
+    parts = re.split(r"\s+", value.strip())
+    return r"\s+".join(re.escape(part) for part in parts)
+
+
+def _pattern_literal_key(pattern) -> str:
+    source = pattern.pattern
+    prefix = r"(?<![A-Za-z0-9])"
+    suffix = r"(?![A-Za-z0-9])"
+    if source.startswith(prefix):
+        source = source[len(prefix):]
+    if source.endswith(suffix):
+        source = source[:-len(suffix)]
+    source = source.replace(r"\s+", " ").replace(r"\s*", " ")
+    source = re.sub(r"\\(.)", r"\1", source)
+    return re.sub(r"\s+", " ", source).strip().casefold()
+
+
+_CURATED_KEYS = {_pattern_literal_key(pattern) for pattern, _ in RULES}
+_GENERATED_RULES = []
+for _term, _spoken in GENERATED_REPLACEMENTS.items():
+    _key = _generated_key(_term)
+    if len(_term.strip()) < 2 or _term.casefold() == _spoken.casefold():
+        continue
+    if _key in _CURATED_KEYS:
+        continue
+    _pattern = re.compile(
+        r"(?<![A-Za-z0-9])(?:"
+        + _generated_pattern(_term)
+        + r")(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    _GENERATED_RULES.append((_pattern, _spoken, len(_term)))
+_GENERATED_RULES.sort(key=lambda item: item[2], reverse=True)
+_GENERATED_RULES = [(pattern, spoken) for pattern, spoken, _ in _GENERATED_RULES]
 
 
 _QWEN_VERSION_RE = re.compile(
@@ -192,7 +238,19 @@ def apply_lexeme_rules(text: str) -> str:
     """Rewrite known English lexemes into their intended spoken form."""
     if not text:
         return text
+
+    # Protect generated frontend_res matches from the older broad rules.
+    protected = []
+    for pattern, replacement in _GENERATED_RULES:
+        def _protect(match):
+            marker = f"\\x00LEX{len(protected)}\\x00"
+            protected.append((marker, replacement))
+            return marker
+        text = pattern.sub(_protect, text)
+
     text = _QWEN_VERSION_RE.sub(_qwen_version, text)
     for pattern, replacement in RULES:
         text = pattern.sub(replacement, text)
+    for marker, replacement in protected:
+        text = text.replace(marker, replacement)
     return text
