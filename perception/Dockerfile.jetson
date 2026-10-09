@@ -12,7 +12,7 @@
 
 ARG PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
-ARG JP_VERSION=511
+ARG JP_VERSION=61
 ARG ENABLE_VITS2_TRT=1
 
 FROM bj-warehouse.tencentcloudcr.com/phanthy-motus/jetson-base:jp${JP_VERSION}-torch
@@ -578,6 +578,7 @@ print('[build] janome ok, no kanji left: %s' % out)"; \
 WORKDIR /work
 COPY perception/main.py    /work/main.py
 COPY perception/plugins/   /work/plugins/
+COPY perception/tools/moss_trt_session.py /work/tools/moss_trt_session.py
 COPY perception/utils/     /work/utils/
 COPY perception/config.yaml /work/config.yaml
 COPY perception/deploy/    /deploy/

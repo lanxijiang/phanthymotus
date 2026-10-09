@@ -206,13 +206,14 @@ TOOLS = [
                 # without rebuilding the image. Mirrors asr_model in asr.py.
                 "tts_engine": {"type": "string",
                                "enum": ["vits2-zh-en", "matcha-zh-en", "mms-th",
-                                        "kokoro-multi"],
+                                        "kokoro-multi", "moss-multi"],
                                "description": "TTS engine, named <model>-<languages> to match "
                                               "asr_model (vits2-zh-en = VITS2 on TensorRT, "
                                               "matcha-zh-en = Matcha-icefall, "
                                               "mms-th = MMS Thai, "
-                                              "kokoro-multi = Kokoro-82M v1.0)",
-                               "default": "vits2-zh-en", "scope": "shared"},
+                                              "kokoro-multi = Kokoro-82M v1.0, "
+                                              "moss-multi = original multilingual MOSS on TensorRT)",
+                               "default": "moss-multi", "scope": "shared"},
                 # matcha-zh-en, mms-th and kokoro-multi only — vits2-zh-en is a
                 # TensorRT engine and never touches ONNX Runtime, so this field does
                 # nothing for it. Matcha's weights are fp32, so both devices load the
@@ -254,6 +255,12 @@ TOOLS = [
                                    "voice for the non-Chinese parts of the text",
                     "default": "en-us", "scope": "shared",
                     "x-show-when": {"tts_engine": ["kokoro-multi"]}},
+                "moss_language": {
+                    "type": "string",
+                    "enum": ["auto", "zh", "ja", "ru", "en", "es", "fr", "th", "de"],
+                    "description": "MOSS language hint for text normalization; auto detects the text",
+                    "default": "auto", "scope": "shared",
+                    "x-show-when": {"tts_engine": ["moss-multi"]}},
                 # Thai has no spaces between words, and MMS was trained on text
                 # that spaced only phrase boundaries. Segmenting every word may
                 # help prosody or hurt it — off until it has been A/B'd on device.
@@ -263,7 +270,7 @@ TOOLS = [
                                    "experimental — may change prosody either way)",
                     "default": False, "scope": "shared",
                     "x-show-when": {"tts_engine": "mms-th"}},
-                "speaker_id": {"type": "integer", "description": "Speaker ID (vits2-zh-en and mms-th support 0 only; for kokoro-multi it is an index within the selected language — 0 is that language's first voice, and the voice moves with tts_language)", "default": 0, "scope": "shared"},
+                "speaker_id": {"type": "integer", "description": "Voice index (MOSS: 0..15 in the author's reference-voice order; VITS2/MMS: 0 only; Kokoro: within selected language)", "default": 0, "scope": "shared"},
                 "speed":      {"type": "number", "description": "Speech speed (1.0 = normal)", "default": 1.0, "scope": "shared"},
             },
             "required": []
@@ -1322,6 +1329,13 @@ def _build_tts_adapter(cfg: dict, on_status=None) -> TTSAdapter:
         cfg.get('device') or ENGINE_DEVICE_DEFAULTS.get(engine),
         cfg.get('hw_provider'),
     )
+    if engine == 'moss-multi':
+        from plugins.moss_tts import MossTTSAdapter
+        return MossTTSAdapter(
+            model_dir, speaker_id=speaker_id,
+            language=cfg.get('moss_language') or 'auto',
+            asset_url=cfg.get('moss_asset_url'),
+        )
     if engine == 'mms-th':
         return MmsThaiTTSAdapter(
             model_dir, speaker_id, speed, device,
@@ -1981,16 +1995,20 @@ class SherpaOnnxTTSPlugin:
             text = args.get("text", "")
             if not text:
                 raise ValueError("text is required")
-            # Find any existing running node to reuse
+            # A named caller must use its own node. Each node has one serial
+            # synthesis worker; sending all named calls to the first running
+            # node would prevent three MOSS inference instances from running.
+            # Calls without an instance_id retain the legacy reuse behaviour.
             with self._nodes_lock:
-                node = None
-                for n in self._nodes.values():
-                    if n.state == "running":
-                        node = n
-                        break
+                node_key = instance_id or '_default'
+                node = self._nodes.get(instance_id) if instance_id else None
+                if not instance_id:
+                    for n in self._nodes.values():
+                        if n.state == "running":
+                            node = n
+                            break
                 if node is None:
-                    # No running node — use instance key or fallback
-                    node_key = instance_id or '_default'
+                    # No matching named node, or no running legacy node.
                     node = self._nodes.get(node_key)
                     if node is None:
                         input_topic = args.get("input_topic") or None
@@ -2005,8 +2023,8 @@ class SherpaOnnxTTSPlugin:
                                         node_suffix=node_key.replace('/', '_').replace('-', '_'))
                         self._executor.add_node(node)
                         self._nodes[node_key] = node
-                    if node.state != "running":
-                        node.start()
+                if node.state != "running":
+                    node.start()
             # ACP: 生成 action_id
             import uuid as _uuid
             action_id = f"speak-{_uuid.uuid4().hex[:8]}"
@@ -2045,7 +2063,9 @@ class SherpaOnnxTTSPlugin:
             # dashboard would differ from a stored `1.0` and defeat the check.
             incoming = _session_keys(cfg)
             speed = float(cfg['speed']) if 'speed' in cfg else None
-            language = str(cfg['tts_language']) if cfg.get('tts_language') else None
+            language_key = ('moss_language' if cfg.get('moss_language')
+                            else 'tts_language' if cfg.get('tts_language') else None)
+            language = str(cfg[language_key]) if language_key else None
 
             needs_rebuild = any(self._cfg.get(key) != value
                                 for key, value in incoming.items())
@@ -2058,7 +2078,7 @@ class SherpaOnnxTTSPlugin:
             if speed is not None:
                 self._cfg['speed'] = speed
             if language is not None:
-                self._cfg['tts_language'] = language
+                self._cfg[language_key] = language
 
             if needs_rebuild or self._adapter is None:
                 changed = sorted(incoming) if needs_rebuild else ['(no model loaded)']
@@ -2118,7 +2138,7 @@ class SherpaOnnxTTSPlugin:
         return self._adapter.synthesize(text)
 
 
-DEFAULT_TTS_ENGINE = "vits2-zh-en"
+DEFAULT_TTS_ENGINE = "moss-multi"
 # `<model>-<languages>`, the shape `asr_model` in plugins/asr.py already uses
 # (x-asr-zh-en, parakeet-en, sensevoice-small). Two reasons to match it rather
 # than invent a second convention: the dashboard renders the raw enum string, so
@@ -2127,7 +2147,7 @@ DEFAULT_TTS_ENGINE = "vits2-zh-en"
 # `matcha` and `mms-th` both run on sherpa-onnx.
 #
 # Language codes, not country codes: `zh`, not `cn`.
-TTS_ENGINES = ("vits2-zh-en", "matcha-zh-en", "mms-th", "kokoro-multi")
+TTS_ENGINES = ("vits2-zh-en", "matcha-zh-en", "mms-th", "kokoro-multi", "moss-multi")
 # Older spellings, still accepted. `vits2_trt` and `sherpa_onnx` are not
 # decoration: both are already persisted in ConfigDB rows and in config.yaml on
 # every deployed robot, and _select_engine raises on an unknown engine — so
@@ -2157,6 +2177,7 @@ ENGINE_MODEL_DIRS = {
     # it: the two devices load different weight files (fp32 vs int8), so they are
     # separate downloads that must not overwrite each other.
     "kokoro-multi": "/models/kokoro-multi",
+    "moss-multi": "/models/moss/assets",
 }
 # Where an engine wants to run when nothing has been configured. Only Kokoro
 # differs: it is a 310 MB fp32 graph on gpu and the CUDA provider is worth having,

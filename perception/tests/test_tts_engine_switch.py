@@ -12,6 +12,7 @@ Run: python -m pytest perception/tests -q
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import threading
 import time
@@ -331,8 +332,8 @@ def test_engines_are_named_after_the_model_not_the_runtime():
     visible.
     """
     assert set(tts.TTS_ENGINES) == {"vits2-zh-en", "matcha-zh-en", "mms-th",
-                                    "kokoro-multi"}
-    assert tts.DEFAULT_TTS_ENGINE == "vits2-zh-en"
+                                    "kokoro-multi", "moss-multi"}
+    assert tts.DEFAULT_TTS_ENGINE == "moss-multi"
     for engine in tts.TTS_ENGINES:
         assert "_" not in engine, "asr_model uses hyphens; do not mix separators"
         assert "cn" not in engine.split("-"), "zh is the language code; cn is a country"
@@ -602,6 +603,48 @@ def _sherpa(monkeypatch):
     return plugin, holder
 
 
+def test_named_speak_routes_three_parallel_calls_to_distinct_nodes(_sherpa, monkeypatch):
+    plugin, _ = _sherpa
+
+    class RoutingNode:
+        gate = threading.Barrier(3)
+
+        def __init__(self, input_topic, adapter, node_suffix=''):
+            self._input_topic = input_topic
+            self._output_topic = f"{input_topic}/tts"
+            self.state = "idle"
+            self.messages = []
+
+        def start(self):
+            self.state = "running"
+            return {"state": self.state}
+
+        def enqueue(self, text, trace_id='', action_id=''):
+            # All three dispatches must reach their node concurrently.
+            if self.gate is not None:
+                self.gate.wait(timeout=5)
+            self.messages.append(text)
+
+    monkeypatch.setattr(tts, "_TTSNode", RoutingNode)
+    for index in range(3):
+        assert plugin.dispatch("tts", {"action": "start", "instance_id": f"card-{index}",
+                                       "input_topic": f"/text/{index}"})["state"] == "running"
+
+    with ThreadPoolExecutor(max_workers=3) as workers:
+        replies = list(workers.map(
+            lambda index: plugin.dispatch("tts", {"action": "speak",
+                                                   "instance_id": f"card-{index}",
+                                                   "text": f"utterance-{index}"}), range(3)))
+    assert all(reply["status"] == "queued" for reply in replies)
+    assert [plugin._nodes[f"card-{index}"].messages for index in range(3)] == [
+        [f"utterance-{index}"] for index in range(3)]
+
+    # Existing callers without an instance_id still reuse the first running node.
+    RoutingNode.gate = None
+    plugin.dispatch("tts", {"action": "speak", "text": "legacy"})
+    assert plugin._nodes["card-0"].messages == ["utterance-0", "legacy"]
+
+
 def test_an_identical_config_does_not_rebuild_the_session(_sherpa):
     """The "every speak takes 5 s" bug.
 
@@ -731,17 +774,17 @@ def test_no_implementation_declares_its_own_engine_name():
         "the engine name belongs to plugins/tts.py's facade, not to an engine")
 
 
-def test_the_default_engine_is_vits2_zh_en():
-    """The ZH/EN TensorRT engine is the default everywhere it is declared."""
+def test_the_default_engine_is_moss_multi():
+    """The leaderboard MOSS engine is the default everywhere it is declared."""
     import pathlib
 
     import yaml
 
-    assert tts.DEFAULT_TTS_ENGINE == "vits2-zh-en"
+    assert tts.DEFAULT_TTS_ENGINE == "moss-multi"
     props = tts.TOOLS[0]["configSchema"]["properties"]
-    assert props["tts_engine"]["default"] == "vits2-zh-en"
+    assert props["tts_engine"]["default"] == "moss-multi"
     config = yaml.safe_load(
         (pathlib.Path(__file__).resolve().parents[1] / "config.yaml").read_text())
     # config.yaml and the schema must agree, or the card shows one default while
     # the process boots another.
-    assert config["plugins"]["tts"]["engine"] == "vits2-zh-en"
+    assert config["plugins"]["tts"]["engine"] == "moss-multi"
