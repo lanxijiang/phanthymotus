@@ -72,6 +72,9 @@ plugins:
     # Orin TensorRT plans must still be built and staged before TTS can start.
     moss_asset_url: "http://172.28.4.81:34567/i-lanxijiang/phanthymotus-tts/moss-orin-assets.tar"
     moss_language: auto
+    # Judgeflow launches three perception containers; one runtime in each gives
+    # three concurrent model instances on the shared Orin.
+    moss_instances: 1
     # vits2-zh-en and mms-th support 0 only. For kokoro-multi this is an index
     # *within* the selected language — 0 is that language's first voice — so the
     # voice moves with `language` and cannot end up mismatched with it. The global

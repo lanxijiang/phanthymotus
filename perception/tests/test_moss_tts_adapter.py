@@ -1,4 +1,4 @@
-"""Offline tests for the MOSS PCM bridge and three isolated runtime leases."""
+"""Offline tests for the MOSS PCM bridge and runtime lease counts."""
 
 from __future__ import annotations
 
@@ -58,11 +58,22 @@ class FakeRuntime:
         return {"language": kwargs["language"]}
 
 
+def test_default_one_runtime_per_process(tmp_path):
+    runtime = FakeRuntime("only")
+    adapter = MossTTSAdapter(
+        str(tmp_path / "assets"), output_dir=tmp_path / "outputs",
+        runtimes=[runtime],
+    )
+    assert adapter.warmup() == 3200
+    assert len(runtime.calls) == 1
+    adapter.close()
+
+
 def test_adapter_consumes_codec_callbacks_as_pcm_and_removes_original_wav(tmp_path):
     runtimes = [FakeRuntime(str(i)) for i in range(3)]
     adapter = MossTTSAdapter(
         str(tmp_path / "assets"), output_dir=tmp_path / "outputs",
-        speaker_id=5, language="zh", runtimes=runtimes,
+        speaker_id=5, language="zh", instances=3, runtimes=runtimes,
     )
     chunks = list(adapter.synthesize_stream("你好。"))
     assert len(chunks) == 2
@@ -78,7 +89,7 @@ def test_three_concurrent_requests_use_three_distinct_runtime_states(tmp_path):
     runtimes = [FakeRuntime(str(i), barrier) for i in range(3)]
     adapter = MossTTSAdapter(
         str(tmp_path / "assets"), output_dir=tmp_path / "outputs",
-        runtimes=runtimes,
+        instances=3, runtimes=runtimes,
     )
     with ThreadPoolExecutor(max_workers=3) as workers:
         audio = list(workers.map(lambda _: adapter.synthesize("Hello."), range(3)))
@@ -91,7 +102,8 @@ def test_three_concurrent_requests_use_three_distinct_runtime_states(tmp_path):
 def test_warmup_visits_all_three_runtimes_in_order(tmp_path):
     runtimes = [FakeRuntime(str(index)) for index in range(3)]
     adapter = MossTTSAdapter(
-        str(tmp_path / "assets"), output_dir=tmp_path / "outputs", runtimes=runtimes,
+        str(tmp_path / "assets"), output_dir=tmp_path / "outputs", instances=3,
+        runtimes=runtimes,
     )
     assert adapter.warmup() == 3 * 3200
     assert [len(runtime.calls) for runtime in runtimes] == [1, 1, 1]
@@ -115,7 +127,8 @@ def test_warmup_reports_silent_and_failed_runtime(tmp_path):
                              (FailedRuntime("failed"), "MOSS warmup failed")):
         runtimes = [runtime, FakeRuntime("1"), FakeRuntime("2")]
         adapter = MossTTSAdapter(
-            str(tmp_path / "assets"), output_dir=tmp_path / "outputs", runtimes=runtimes,
+            str(tmp_path / "assets"), output_dir=tmp_path / "outputs", instances=3,
+            runtimes=runtimes,
         )
         with pytest.raises(RuntimeError, match=message):
             adapter.warmup()

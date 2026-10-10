@@ -131,6 +131,11 @@ RUN pip3 install --no-cache-dir -i ${PYPI_MIRROR} --ignore-installed PyYAML && \
     pip3 install --no-cache-dir -i ${PYPI_MIRROR} \
     websockets webrtcvad "tflite-runtime==2.13.0"
 
+# MOSS uses SentencePiece at module import time.  Keep this independent of
+# other TTS frontends so a TTS-only image can always import its own adapter.
+RUN pip3 install --no-cache-dir --no-deps -i ${PYPI_MIRROR} \
+    "sentencepiece>=0.1.99"
+
 # ── Vision deps (vop detection, visual_depth, OCR, face) ─────────
 # Fix broken system cv2 __init__.py (mat_wrapper circular import on Jetson).
 # Only jp5.11's base is broken; on jp6.1 the import succeeds and this is a no-op.
@@ -579,9 +584,14 @@ WORKDIR /work
 COPY perception/main.py    /work/main.py
 COPY perception/plugins/   /work/plugins/
 COPY perception/tools/moss_trt_session.py /work/tools/moss_trt_session.py
+COPY perception/tools/moss_smoke.py /work/tools/moss_smoke.py
 COPY perception/utils/     /work/utils/
 COPY perception/config.yaml /work/config.yaml
 COPY perception/deploy/    /deploy/
+
+# Fail the image build if the MOSS adapter cannot even be imported.  The first
+# leaderboard attempt spent 60 seconds per case after this import failed.
+RUN cd /work && python3 -c "import sentencepiece; from plugins.moss_deploy.runtime import MossRuntime; print('[build] MOSS runtime import ok')"
 
 # ── Thai frontend self-check, on the real interpreter ──────────────────────────
 # Runs the frontend that was just copied in, on the Python this image actually

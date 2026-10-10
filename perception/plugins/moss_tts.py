@@ -1,8 +1,8 @@
 """MOSS TTS adapter for the existing perception TTS tool and ROS publisher.
 
-Three original-model runtimes have separate RNG, codec and KV state while one
-TensorRT graph pool owns the immutable engines. Each synthesis leases one
-runtime and forwards its real codec callbacks as 16 kHz mono PCM16 bytes.
+Original-model runtimes have separate RNG, codec and KV state while one
+TensorRT graph pool per process owns the immutable engines. Each synthesis
+leases one runtime and forwards its real codec callbacks as 16 kHz mono PCM16.
 """
 
 from __future__ import annotations
@@ -29,16 +29,16 @@ class _Cancelled(Exception):
 
 
 class MossTTSAdapter:
-    """TTSAdapter-compatible facade over exactly three independent runtimes."""
+    """TTSAdapter-compatible facade over independent in-process runtimes."""
 
     dry_run_text = "你好。"
 
     def __init__(self, model_dir: str, *, speaker_id: int = 0,
-                 language: str = "auto", instances: int = 3,
+                 language: str = "auto", instances: int = 1,
                  asset_url: str | None = None, output_dir: str | Path | None = None,
                  runtimes=None, lease_timeout_s: float = 10.0):
-        if instances != 3:
-            raise ValueError("The MOSS deployment is configured for exactly three inference instances")
+        if not 1 <= instances <= 3:
+            raise ValueError("MOSS instances per process must be 1..3")
         self._model_dir = Path(model_dir).resolve()
         self._output_dir = Path(output_dir or self._model_dir.parent / "outputs").resolve()
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -56,7 +56,7 @@ class MossTTSAdapter:
         else:
             self._runtimes = tuple(runtimes)
             if len(self._runtimes) != instances or len({id(x) for x in self._runtimes}) != instances:
-                raise ValueError("MOSS needs three distinct runtime objects")
+                raise ValueError(f"MOSS needs {instances} distinct runtime objects")
             voices = ("Junhao", "Zhiming", "Weiguo", "Xiaoyu", "Yuewen", "Lingyu",
                       "Trump", "Ava", "Bella", "Adam", "Nathan", "Sakura", "Yui",
                       "Aoi", "Hina", "Mei")
@@ -118,8 +118,8 @@ class MossTTSAdapter:
 
     def warmup(self) -> int:
         # Each completed synthesis returns its lease to the tail of _available.
-        # At startup this visits all three runtimes in turn, materializing each
-        # runtime's lazy TensorRT contexts before the first scored request.
+        # At startup this visits every in-process runtime in turn, materializing
+        # its lazy TensorRT contexts before the first scored request.
         total_bytes = 0
         for index in range(len(self._runtimes)):
             try:
@@ -146,7 +146,7 @@ class MossTTSAdapter:
         try:
             runtime = self._available.get(timeout=self._lease_timeout_s)
         except queue.Empty as error:
-            raise RuntimeError("All three MOSS inference instances are busy") from error
+            raise RuntimeError("All MOSS inference instances in this process are busy") from error
         with self._config_lock:
             language = self._language
         audio_queue: queue.Queue = queue.Queue(maxsize=32)

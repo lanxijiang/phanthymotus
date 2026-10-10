@@ -1334,6 +1334,7 @@ def _build_tts_adapter(cfg: dict, on_status=None) -> TTSAdapter:
         return MossTTSAdapter(
             model_dir, speaker_id=speaker_id,
             language=cfg.get('moss_language') or 'auto',
+            instances=int(cfg.get('moss_instances', 1)),
             asset_url=cfg.get('moss_asset_url'),
         )
     if engine == 'mms-th':
