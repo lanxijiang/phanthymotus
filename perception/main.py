@@ -33,6 +33,7 @@ logsafe.install()
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -569,6 +570,79 @@ def _start_ws_thread(ws_port: int):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
+def _preload_tts(bundle: PerceptionBundle, cfg: dict) -> None:
+    """Finish the configured TTS warmup before opening any service port.
+
+    Only the plugin's fixed warmup sentences are synthesized. The temporary
+    instance has no speech requests; stopping it removes its ROS node while
+    the plugin keeps the initialized adapter resident for real requests.
+    """
+    enabled = cfg.get("preload_tts", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("preload_tts must be a boolean")
+    if not enabled:
+        return
+    timeout_s = float(cfg.get("preload_tts_timeout_s", 300.0))
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("preload_tts_timeout_s must be finite and positive")
+    tts_cfg = cfg.get("plugins", {}).get("tts", {})
+    if not tts_cfg.get("enabled", False) or not bundle.owns("tts"):
+        raise RuntimeError("preload_tts requires an enabled, registered TTS plugin")
+    if not tts_cfg.get("warmup", True):
+        raise ValueError("preload_tts requires plugins.tts.warmup=true")
+
+    instance_id = "__startup_tts_preload__"
+    args = {"instance_id": instance_id, "input_topic": "/perception/tts/preload"}
+    began = time.monotonic()
+    last_progress = began
+    initialized = False
+    log.info("[tts-preload] download/load/warmup starting; timeout=%.1fs", timeout_s)
+    try:
+        result = bundle.dispatch("tts", {**args, "action": "start"})
+        while True:
+            elapsed = time.monotonic() - began
+            if not isinstance(result, dict):
+                raise RuntimeError("TTS preload returned no status")
+            state = result.get("state")
+            if state == "error":
+                reason = result.get("error") or result.get("message") or result.get("desc")
+                raise RuntimeError(f"TTS preload failed: {reason or result}")
+            if elapsed >= timeout_s:
+                raise TimeoutError(
+                    f"TTS download/load/warmup timed out after {elapsed:.3f}s "
+                    f"(last state={state!r})"
+                )
+            if state == "running":
+                initialized = True
+                break
+            # The background loader installs the resident adapter just before
+            # bringing up pending nodes; info can briefly say idle in between.
+            # It still must reach running before any listener is opened.
+            if state not in ("loading", "idle"):
+                raise RuntimeError(f"Unexpected TTS preload state: {state!r}")
+            now = time.monotonic()
+            if now - last_progress >= 10.0:
+                log.info("[tts-preload] download/load/warmup still pending; elapsed=%.1fs", elapsed)
+                last_progress = now
+            time.sleep(min(0.1, timeout_s - elapsed))
+            result = bundle.dispatch("tts", {**args, "action": "info"})
+    finally:
+        try:
+            stopped = bundle.dispatch("tts", {"action": "stop", "instance_id": instance_id})
+            if not isinstance(stopped, dict) or stopped.get("state") != "idle":
+                raise RuntimeError(f"TTS preload instance did not stop cleanly: {stopped!r}")
+        except Exception:
+            if initialized:
+                raise
+            # Keep the original load/timeout error as the startup failure.
+            log.exception("[tts-preload] temporary instance cleanup failed")
+    log.info(
+        "[tts-preload] download/load/warmup finished in %.3fs; "
+        "temporary instance removed, model retained; opening service ports",
+        time.monotonic() - began,
+    )
+
+
 def _start_registration(mcp_port: int, name: str, category: str):
     """Register this driver with agent-core in a background thread, then heartbeat every 30s."""
     import urllib.request as _urllib
@@ -623,8 +697,8 @@ def main():
     global _bundle
 
     cfg      = _load_config()
-    mcp_port = int(cfg.get("mcp_port", 15720))
-    ws_port  = int(cfg.get("ws_port",  15721))
+    mcp_port = int(os.environ.get("MCP_PORT") or cfg.get("mcp_port", 15720))
+    ws_port  = int(os.environ.get("WS_PORT") or cfg.get("ws_port", 15721))
 
     log.info(f"perception bundle starting, mcp_port={mcp_port}, ws_port={ws_port}")
     log.info(f"config: plugins.asr.enabled={cfg.get('plugins',{}).get('asr',{}).get('enabled')}, "
@@ -675,24 +749,29 @@ def main():
                               "ROS callbacks were interrupted")
                 time.sleep(1.0)
 
-    threading.Thread(target=_spin, daemon=True, name="perception_spin").start()
-
-    # Start WebSocket ASR server in a separate thread
-    threading.Thread(target=_start_ws_thread, args=(ws_port,), daemon=True, name="ws_asr").start()
-
-    _start_registration(mcp_port, "Perception Stack", "perception")
-
-    server = ThreadingHTTPServer(("", mcp_port), make_handler())
-    log.info(f"MCP server → http://0.0.0.0:{mcp_port}")
-
-    def _shutdown(signum, frame):
-        log.info(f"signal {signum}, shutting down")
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
+    spin_ready = threading.Event()
     try:
+        if cfg.get("preload_tts", False):
+            # Run the event setter through the executor itself: thread.start()
+            # alone does not prove ROS callbacks are being processed yet.
+            executor.create_task(spin_ready.set)
+        threading.Thread(target=_spin, daemon=True, name="perception_spin").start()
+        if cfg.get("preload_tts", False) and not spin_ready.wait(timeout=10.0):
+            raise RuntimeError("ROS executor did not start before TTS preload")
+        _preload_tts(_bundle, cfg)
+
+        # External listeners and registration follow successful TTS preload.
+        threading.Thread(target=_start_ws_thread, args=(ws_port,), daemon=True, name="ws_asr").start()
+        _start_registration(mcp_port, "Perception Stack", "perception")
+        server = ThreadingHTTPServer(("", mcp_port), make_handler())
+        log.info(f"MCP server → http://0.0.0.0:{mcp_port}")
+
+        def _shutdown(signum, frame):
+            log.info(f"signal {signum}, shutting down")
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
         server.serve_forever()
     finally:
         executor.shutdown()

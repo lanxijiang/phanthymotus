@@ -16,7 +16,9 @@ def normalize_text_mix(text):
     if has_zh and not has_en:
         return chinese.text_normalize(text)
     if has_en and not has_zh:
-        return chinese.mix_normalize(text)
+        # The Chinese FST expands English digits into Chinese and can mistake
+        # parts of ordinary words (e.g. the "log" in "kilograms") for math.
+        return english.text_normalize(text)
     return chinese.mix_normalize(text)
 
 

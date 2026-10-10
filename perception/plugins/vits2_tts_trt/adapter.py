@@ -45,7 +45,10 @@ CHUNK_PAUSE_MS = _env_int("MIX_VITS_CHUNK_PAUSE_MS", 0, 0, 1000)
 WARMUP_CASES = (
     "你好，语音服务已经准备好了。",
     "今天可以使用平板电脑查看消息。",
-    "The device is ready for a short test."
+    # Exercise the dictionary-miss path as well as ordinary English. A warmup
+    # containing only CMU words leaves the NLTK tagger and G2P predictor cold.
+    "The phonemizer is ready for a short test.",
+    "语音 phonemizer 已经准备好了。",
 )
 
 class TTSAdapter(ABC):
@@ -101,9 +104,6 @@ class Vits2TensorRTAdapter(TTSAdapter):
         with self._lock:
             self._speed = speed
 
-    def _token_count(self, text: str) -> int:
-        return len(self._engine._get_text_ids(text, normalized=True)[0])
-
     def iter_text_chunks(self, text: str):
         """Yield the exact normalized text chunks and IDs used in production."""
         text = text.strip()
@@ -114,11 +114,25 @@ class Vits2TensorRTAdapter(TTSAdapter):
             iter_text_chunks as _frontend_iter_text_chunks,
         )
 
+        # Chunk packing asks about a unit more than once. Reuse exactly those
+        # IDs for synthesis so a dictionary miss does not run G2P repeatedly.
+        # The cache belongs to this invocation, never to a later request.
+        text_ids_by_chunk = {}
+
+        def text_ids_for(chunk):
+            if chunk not in text_ids_by_chunk:
+                text_ids_by_chunk[chunk] = self._engine._get_text_ids(
+                    chunk, normalized=True
+                )
+            return text_ids_by_chunk[chunk]
+
+        def token_count(chunk):
+            return len(text_ids_for(chunk)[0])
+
         for chunk in _frontend_iter_text_chunks(
-            normalize_text_mix(text), self._token_count, self.max_chunk_tokens
+            normalize_text_mix(text), token_count, self.max_chunk_tokens
         ):
-            text_ids = self._engine._get_text_ids(chunk, normalized=True)
-            yield chunk, text_ids
+            yield chunk, text_ids_for(chunk)
 
     def synthesize(self, text: str) -> bytes:
         return b"".join(self.synthesize_stream(text))

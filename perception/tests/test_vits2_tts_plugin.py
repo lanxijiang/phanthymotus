@@ -234,6 +234,157 @@ def test_load_failure_releases_queued_speak_actions(monkeypatch, completions):
     assert [c for c in completions if c[0] == action_id][0][3] is True
 
 
+def _fail_instance_start(monkeypatch, executor, stage):
+    """Fail one ROS instance, while leaving the shared model and its peers live."""
+    fault = {"enabled": True}
+
+    def fail():
+        try:
+            raise ValueError("original ROS failure")
+        except ValueError as error:
+            raise RuntimeError(f"{stage} failed") from error
+
+    if stage == "constructor":
+        original = vits2._Vits2TTSNode
+
+        def construct(input_topic, *args, **kwargs):
+            if input_topic == "/bad" and fault["enabled"]:
+                fail()
+            return original(input_topic, *args, **kwargs)
+
+        monkeypatch.setattr(vits2, "_Vits2TTSNode", construct)
+    elif stage == "registration":
+        original = executor.add_node
+
+        def register(node):
+            original(node)
+            if node._input_topic == "/bad" and fault["enabled"]:
+                # Cleanup must also remove a partially registered ROS node.
+                fail()
+
+        monkeypatch.setattr(executor, "add_node", register)
+    else:
+        original = vits2._Vits2TTSNode.start
+
+        def start(node):
+            if node._input_topic == "/bad" and fault["enabled"]:
+                fail()
+            return original(node)
+
+        monkeypatch.setattr(vits2._Vits2TTSNode, "start", start)
+    return fault
+
+
+@pytest.mark.parametrize("stage", ["constructor", "registration", "start"])
+def test_instance_start_failure_is_reported_without_poisoning_adapter(
+    monkeypatch, completions, stage
+):
+    plugin, executor, state = _plugin(monkeypatch, gated=True)
+    fault = _fail_instance_start(monkeypatch, executor, stage)
+    try:
+        plugin.dispatch("tts", {"action": "start", "instance_id": "bad", "input_topic": "/bad"})
+        queued = plugin.dispatch("tts", {"action": "speak", "instance_id": "bad", "text": "取消我"})
+        plugin.dispatch("tts", {"action": "start", "instance_id": "good", "input_topic": "/good"})
+        state["release"]()
+        assert _wait_until(lambda: plugin.dispatch("tts", {"action": "info", "instance_id": "good"})["state"] == "running")
+
+        info = plugin.dispatch("tts", {"action": "info", "instance_id": "bad"})
+        assert info["state"] == "error"
+        assert f"{stage} failed" in info["error"]
+        assert "original ROS failure" in info["error"]
+        assert info["topic_out"][0]["topic"] == "/bad/tts"
+        assert "Instance start failed" in info["desc"]
+        assert _record(completions, queued["action_id"])[3] is True
+        assert plugin._adapter_state == "ready"
+        assert plugin._load_error is None
+        assert len(executor.nodes) == 1
+        assert set(plugin._playback_clocks) == {"/good/tts"}
+        adapter = plugin._adapter
+        aggregate = plugin.dispatch("tts", {"action": "info"})
+        assert aggregate["state"] == "running"
+        assert aggregate["instance_errors"]["bad"] == info["error"]
+        # A failed explicit target must not silently speak through its peer.
+        answer = plugin.dispatch("tts", {"action": "speak", "instance_id": "bad", "text": "不应播报"})
+        assert answer == {"state": "error", "message": info["error"]}
+        assert adapter.spoken == []
+
+        # Only retrying the failed instance clears its error; the engines stay
+        # loaded, and the healthy instance keeps its original node.
+        healthy_node = executor.nodes[0]
+        fault["enabled"] = False
+        answer = plugin.dispatch("tts", {"action": "start", "instance_id": "bad", "input_topic": "/bad"})
+        assert answer["state"] == "running"
+        assert "error" not in plugin.dispatch("tts", {"action": "info", "instance_id": "bad"})
+        assert "instance_errors" not in plugin.dispatch("tts", {"action": "info"})
+        assert healthy_node in executor.nodes
+        assert plugin._adapter is adapter
+        assert state["loads"] == 1
+    finally:
+        state["release"]()
+        plugin.dispatch("tts", {"action": "stop"})
+
+
+@pytest.mark.parametrize("stage", ["constructor", "registration", "start"])
+def test_resident_start_failure_and_stop_clear_instance_error(monkeypatch, stage):
+    plugin, executor, state = _running(monkeypatch)
+    adapter = plugin._adapter
+    plugin.dispatch("tts", {"action": "stop"})
+    fault = _fail_instance_start(monkeypatch, executor, stage)
+    try:
+        answer = plugin.dispatch("tts", {"action": "start", "instance_id": "bad", "input_topic": "/bad"})
+        assert answer["state"] == "error"
+        assert "original ROS failure" in answer["message"]
+        assert plugin.dispatch("tts", {"action": "info"})["state"] == "error"
+        assert executor.nodes == []
+        assert not plugin._playback_clocks
+        plugin.dispatch("tts", {"action": "stop", "instance_id": "bad"})
+        assert plugin.dispatch("tts", {"action": "info", "instance_id": "bad"})["state"] == "idle"
+        assert plugin.dispatch("tts", {"action": "info"})["state"] == "idle"
+        # A stopped error is not sticky for the next request.
+        fault["enabled"] = False
+        assert plugin.dispatch("tts", {"action": "start", "instance_id": "bad", "input_topic": "/bad"})["state"] == "running"
+        assert plugin._adapter is adapter and state["loads"] == 1
+    finally:
+        plugin.dispatch("tts", {"action": "stop"})
+
+
+def test_stop_during_node_construction_does_not_resurrect_failure(monkeypatch):
+    plugin, executor, state = _plugin(monkeypatch, gated=True)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original_bring_up = plugin._bring_up_pending
+
+    def construct(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(3)
+        raise RuntimeError("cancelled constructor failed")
+
+    def bring_up(*args):
+        try:
+            return original_bring_up(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(vits2, "_Vits2TTSNode", construct)
+    monkeypatch.setattr(plugin, "_bring_up_pending", bring_up)
+    try:
+        plugin.dispatch("tts", {"action": "start", "instance_id": "bad", "input_topic": "/bad"})
+        state["release"]()
+        assert entered.wait(3)
+        plugin.dispatch("tts", {"action": "stop", "instance_id": "bad"})
+        release.set()
+        assert finished.wait(3)
+        info = plugin.dispatch("tts", {"action": "info", "instance_id": "bad"})
+        assert info["state"] == "idle" and "error" not in info
+        assert executor.nodes == []
+        assert not plugin._playback_clocks
+        assert plugin._adapter_state == "ready"
+    finally:
+        state["release"]()
+        release.set()
+        finished.wait(3)
+        plugin.dispatch("tts", {"action": "stop"})
+
+
 # ── stop / interrupt while still loading ─────────────────────────────────────
 
 def test_stop_during_loading_cancels_the_pending_instance(monkeypatch):

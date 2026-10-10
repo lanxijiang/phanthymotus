@@ -26,9 +26,8 @@ import logging
 import os
 import re
 
-from g2p_en import G2p
 from .symbols import punctuation
-from .english import eng_dict, refine_ph, post_replace_ph, arpa
+from .english import eng_dict, refine_ph, post_replace_ph, arpa, _g2p as _g2p_en
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +37,6 @@ with open(os.path.join(current_file_path, "opencpop-strict.txt"), encoding="utf-
         line.split("\t")[0]: line.strip().split("\t")[1]
         for line in _f
     }
-
-_g2p_en = None
 
 # Chinese initials — longest-first so 'zh'/'ch'/'sh' match before 'z'/'c'/'s'
 _INITIALS = [
@@ -150,9 +147,9 @@ def _en_token_to_phones(word: str):
                 phones.append(post_replace_ph(phn))
                 tones.append(tone)
     else:
-        global _g2p_en
-        if _g2p_en is None:
-            _g2p_en = G2p()
+        # Pure English and mixed text use the same immutable G2P weights. This
+        # avoids constructing a second predictor at the first mixed OOV word;
+        # the mixed frontend's own phone/tone conversion remains unchanged.
         for ph in filter(lambda p: p != " ", _g2p_en(word)):
             if ph in arpa:
                 ph, tone = refine_ph(ph)

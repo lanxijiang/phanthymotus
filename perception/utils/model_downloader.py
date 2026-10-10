@@ -999,6 +999,9 @@ def _merge_tree(source: str, destination: str) -> None:
 VITS2_MODEL_BASE = os.environ.get("VITS2_MODEL_BASE_URL", COS_BASE)
 VITS2_MODEL_ARCHIVES = {
     "jp61": {
+        # Personal Darvin asset mirror; the archive is unchanged and keeps its
+        # upstream size/SHA256 pin. This path was verified by a clean install.
+        "url": "http://172.28.4.81:34567/i-lanxijiang/phanthymotus-tts/old-benchmark/vits2-jp61/vits2-zh-en-male-16k-tensorrt-jp61-trt10.4-orin.tar.gz",
         "archive": "vits2-zh-en-male-16k-tensorrt-jp61-trt10.4-orin.tar.gz",
         "size": 61834952,
         "sha256": "f04ab439588cd3106ccd245f64af548199ba888d31627827c07ac28368225805",
@@ -1025,7 +1028,9 @@ def ensure_vits2_model(model_dir: str, family: str | None = None,
     ensure_verified_archive(
         f"vits2/{key}",
         model_dir,
-        f"{VITS2_MODEL_BASE.rstrip('/')}/{entry['archive']}",
+        (f"{VITS2_MODEL_BASE.rstrip('/')}/{entry['archive']}"
+         if os.environ.get("VITS2_MODEL_BASE_URL")
+         else entry.get("url", f"{VITS2_MODEL_BASE.rstrip('/')}/{entry['archive']}")),
         entry,
         progress_cb=progress_cb,
         stage_cb=stage_cb,

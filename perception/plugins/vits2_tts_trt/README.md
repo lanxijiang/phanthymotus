@@ -4,65 +4,60 @@ Chinese-English VITS2 speech synthesis (16 kHz, single speaker) for Jetson
 Orin. It is one implementation of the standard `tts` plugin, not a second MCP
 plugin — `plugins/tts.py` owns the tool contract and picks the engine.
 
-## Build
+## 本分支部署：JP6.1 中英文
 
-`ENABLE_VITS2_TRT` defaults to 1, so both JetPack lines build with the VITS2
-frontend installed:
+本分支使用 VITS2 单音色中英文模型。完整 TTS 网络分为
+`encoder_duration.plan`、`flow.plan`、`decoder.plan` 三个 TRT 文件，
+合计 **55,770,748 B**。按 2026-10-10 的项目确认，允许适当超过原 50MB
+要求，继续采用已有 FP16 权重；未采用局部 INT8 实验。
+
+前端字典、FST、NLTK/G2P 资源及镜像另计。三份 TTS 网络在 Orin GPU
+执行；文本前端与 iSTFT 在 CPU，英文未登录词的 `g2p_en` 还包含 CPU GRU。
+
+镜像复用固定 digest 的官方 JP6.1 perception 运行环境，复制本分支应用代码，
+模型通过 JuiceFS HTTP 按字节数和 SHA256 校验下载。构建不复制模型、不执行
+模型推理或 TRT 编译。当前这份 Dockerfile 只接受 JP6.1：
 
 ```bash
-cd phanthymotus/deploy
-./build_perception.sh --jp-version 6.1     # TensorRT 10
-./build_perception.sh --jp-version 5.11    # TensorRT 8
+docker build -f perception/Dockerfile.jetson \
+  --build-arg JP_VERSION=61 \
+  -t lanxijiang-vits2-jp61:zh-en-v2 .
 ```
 
-The image installs the WeText/Kaldifst runtime; Chinese text normalization
-executes the pre-compiled FSTs shipped in the model release, so neither
-OpenFST nor Pynini is built on the device. Model files are not embedded in the
-image.
+`config.yaml` 只启用 TTS，读取 `MCP_PORT` / `WS_PORT` 环境变量。
+`preload_tts: true` 使模型安装、加载和固定文本预热在 HTTP/WS 监听前完成；
+初始化失败或超时会使进程启动失败。首个用户请求因此使用已加载的模型。
 
-numpy is pinned once, in `Dockerfile.jetson`, to the version each JetPack's
-torch/cv2/rapidocr stack was built against (jp61 1.26.4, jp511 1.24.4) and that
-same pin is passed to this package's install — `requirements.jetson.txt`
-deliberately does not list numpy. See the comment there before adding a
-dependency that wants a different one.
+发送保持 100ms PCM 帧，默认预缓冲 10 帧；同一话题共享发送时钟，跨句及
+`stop/start` 按实际 PCM 字节数估算剩余播放时长，限制估计领先量为 1 秒。
+这不会修改 PCM 或音频播放速度，也不表示收到了播放器实际缓冲反馈。
 
-### JetPack 5.1.1 / TensorRT 8
+Darvin 采用个人仓库、实际推送 commit 和 `JP_VERSION=6`；通过 Darvin
+后再提 PR。适配器测试、MCP/DDS 本地测试和平台正式成绩应分别记录。
 
-Both lines build from the same source; `ENABLE_VITS2_TRT` defaults to 1. What
-differs on jp511, and what to check when bringing a device up:
+### 提交前验证（2026-10-10）
 
-- **Python 3.8.** The frontend needs `importlib.resources.files`, which arrived
-  in 3.9 — `requirements.jetson.txt` installs the `importlib_resources`
-  backport under a marker and `frontend/wetext_compat.py` patches it in before
-  WeText loads. Nothing else in the package uses 3.9+ syntax.
-- **One source build.** Every dependency resolves to a cp38 aarch64 wheel
-  except `pyahocorasick` (wetext → contractions → textsearch), which has never
-  published one. The Dockerfile installs `python3-dev` only if `Python.h` is
-  missing, so this compiles during the build — slow under qemu, fine natively.
-- **Compute capability must be 8.7.** The engines are built for Orin
-  (`trtexec 8.5.2.2`, sm87) and `_validate_manifest` refuses a mismatch with
-  `GPU compute capability mismatch`. Orin AGX/NX/Nano are 8.7; a Xavier device
-  (7.2) needs its own plans built on it. Check with
-  `python3 -c "import torch;print(torch.cuda.get_device_capability())"`.
-- **The TensorRT API in use is 8.5+**: `num_io_tensors`, `get_tensor_name`,
-  `get_tensor_mode`, `set_input_shape`, `set_tensor_address`,
-  `get_tensor_shape`, `execute_async_v3`. All present in 8.5.2 — the same
-  name-based API `utils/tensorrt_runtime.py` relies on for OCR.
-- **Memory is the practical limit.** jp511 devices are usually Orin NX 8/16 GB
-  and perception already keeps ASR, VOP (YOLOv8-World) and OCR (TensorRT)
-  resident. VITS2 adds ~54 MB of engines plus a CUDA context. Measure on 8 GB
-  before enabling everything at once.
-- `runtime: nvidia` is required, as on jp61: the L4T base ships zero-length
-  placeholders for the driver libraries and only that runtime mounts the real
-  ones over them (`deploy/service.yml` sets it).
+JP6.1 Orin 上的本分支镜像已构建并完成单实例 MCP/DDS 测试：10 条人工
+文本全部成功，TTFT 0.508～0.644 秒，端到端 RTF 0.910～0.996。
+反复 `start/speak/stop` 使用同一实例和话题；全部接收帧数、字节数与
+服务端相符，PCM 与原 FP16 适配器输出逐字节一致。冷启动约 27.3 秒，
+包括真实下载、加载和固定文本预热，完成后才开放 HTTP。
+
+56 项生命周期、发送时钟和预热回归测试通过。上述为本地验证，Darvin
+尚未提交；长文本 RTF 余量较小，GPU 占用准入及平台评分仍待正式评测。
+共享机器采样峰值可超过 10%，包含等待期的平均占用不作为达标依据。
+
+提交旧 TTS 榜时，`PHANTHYMOTUS_REPO` 填个人公开仓库地址，
+`PHANTHYMOTUS_COMMIT_ID` 填已推送的完整 Git commit，
+`TTS_PLUGIN=tts`、`JP_VERSION=6`。平台按代码构建镜像，本次无需另传镜像。
 
 ### A landmine worth knowing
 
 `g2p_en` calls `nltk.download()` at **module import** if the corpora are not on
 `nltk.data.path`. `frontend/english.py` therefore inserts the release's
 `nltk_data` directory before importing it, and nothing may import `g2p_en`
-earlier — including build-time checks, which is why the Dockerfile only asserts
-the package is installed rather than importing it.
+earlier — including build-time checks. This Dockerfile inherits the pinned
+runtime dependencies and does not import `g2p_en` during the image build.
 
 ## Configure
 
@@ -73,7 +68,7 @@ device panel:
 plugins:
   tts:
     enabled: true
-    engine: vits2_trt      # or sherpa_onnx; also settable via action=config
+    engine: vits2-zh-en
     backend: trt           # VITS2 requires trt
     model_dir: /models/vits2
     speed: 1.0
@@ -92,8 +87,10 @@ utterance, including one abandoned before it reached a node.
 ## Model release
 
 `utils.model_downloader.ensure_vits2_model()` installs one archive per JetPack
-family (~60 MB) from COS, pinned by size and SHA256, using the same lock /
-staging / retry path as the other verified models. It returns the engine
+family (~60 MB), pinned by size and SHA256, using the same lock /
+staging / retry path as the other verified models. This branch defaults JP6.1
+to the verified personal JuiceFS mirror in `utils/model_downloader.py`;
+`VITS2_MODEL_BASE_URL` remains an optional override. It returns the engine
 directory for the TensorRT that is actually importable, so `engines/jp61` and
 `engines/jp511` can never be confused — TensorRT plans are not portable across
 TensorRT majors or GPU architectures.
@@ -105,7 +102,7 @@ container never calls `nltk.download()` at runtime. Upstream is
 at revision `14954122c4baf4e80b44436c4b2b167e38db4103`; the runtime-required
 files of that revision were repacked and mirrored to COS.
 
-Installation happens in a background loader on the first `start`/`speak`, which
+With `preload_tts` disabled, installation happens in a background loader on the first `start`/`speak`, which
 returns `{"state": "loading"}` immediately — the download plus three TensorRT
 engines plus warmup takes far longer than the 60 s Agent Core allows a
 processor `tools/call`. Instances that were requested while the model loaded

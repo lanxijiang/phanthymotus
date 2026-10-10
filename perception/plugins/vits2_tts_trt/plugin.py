@@ -68,11 +68,14 @@ def _env_int(name: str, default: int, low: int, high: int) -> int:
 # queued, which played back overlapped and 1.43x too fast.
 FRAME_INTERVAL_MS = _env_int("MIX_VITS_FRAME_INTERVAL_MS", int(PCM_FRAME_MS), 0, 1000)
 FIRST_FRAME_DELAY_MS = _env_int("MIX_VITS_FIRST_FRAME_DELAY_MS", 0, 0, 1000)
-# Frames held back before pacing starts, then published in one burst so every
-# consumer begins with a real cushion instead of zero. This — not the pacing
-# interval — is where the downstream margin comes from. The sherpa engine has
-# always done this (plugins/tts.py PREBUF_FRAMES); same idea on this engine.
-PREBUFFER_FRAMES = _env_int("MIX_VITS_PREBUFFER_FRAMES", 5, 0, 100)
+# Frames held back before pacing starts. Publish the available initial cushion
+# in a burst; the shared topic clock subtracts any audio still queued from a
+# previous utterance instead of granting another full cushion on every sentence.
+PREBUFFER_FRAMES = _env_int("MIX_VITS_PREBUFFER_FRAMES", 10, 0, 100)
+# Bound sent PCM ahead of the estimated playback head across utterances and
+# node restarts. EOF does not mean the consumer has played the final frame.
+MAX_PLAYBACK_LEAD_S = 1.0
+PACING_CANCEL_POLL_S = 0.02
 # Depth of the synthesis→publish handoff queue, in frames. Bounds memory while
 # still letting TensorRT run a whole text chunk ahead of the paced publisher.
 SYNTH_QUEUE_FRAMES = _env_int("MIX_VITS_SYNTH_QUEUE_FRAMES", 200, 1, 4000)
@@ -209,12 +212,22 @@ def _complete_action(
         log.warning("[vits2_tts_trt] ACP completion callback failed: %s", exc)
 
 
+class _PlaybackClock:
+    """Publisher-side playback estimate shared by nodes on one audio topic."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.tail_s = 0.0
+        self.users = 0  # Protected by the owning plugin's _state_lock.
+
+
 class _Vits2TTSNode(Node):
     def __init__(
         self,
         input_topic: Optional[str],
         adapter: TTSAdapter,
         node_suffix: str = "",
+        playback_clock: Optional[_PlaybackClock] = None,
     ):
         super().__init__(f"vits2_trt_{node_suffix}" if node_suffix else "vits2_trt")
         self._input_topic = input_topic or ""
@@ -222,6 +235,8 @@ class _Vits2TTSNode(Node):
             f"{input_topic}/tts" if input_topic else "/perception/tts"
         )
         self._adapter = adapter
+        self._playback_clock = playback_clock or _PlaybackClock()
+        self._clock_lease_owner = None
         self.state = "idle"
         self._text_queue = queue.Queue()
         self._worker_thread = None
@@ -325,6 +340,51 @@ class _Vits2TTSNode(Node):
     def _publish_eof(self):
         """Publish the protocol end-of-utterance marker."""
         self._publish(AUDIO_EOF_MAGIC)
+
+    def _wait_until(self, deadline: float) -> bool:
+        """Wait for pacing without hiding interrupt/stop in a long sleep."""
+        while not self._utterance_cancelled():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            self._stop_event.wait(min(remaining, PACING_CANCEL_POLL_S))
+        return False
+
+    def _publish_pcm_frame(self, pcm: bytes) -> Optional[float]:
+        """Atomically publish and account for PCM duration on this topic.
+
+        This estimates backlog from sent bytes, not playback acknowledgements.
+        Retain it on EOF/interrupt: neither proves the consumer dropped audio.
+        """
+        duration = len(pcm) / (SAMPLE_RATE * 2)
+        if duration > MAX_PLAYBACK_LEAD_S:
+            raise ValueError("PCM frame exceeds the one-second playback lead limit")
+        # Offline throughput testing requires both explicit opt-in and a faster
+        # frame interval. Never accumulate a simulated playback tail in this
+        # mode: its consumer is expected to collect audio faster than real time.
+        if ALLOW_FAST_DELIVERY and FRAME_INTERVAL_MS < PCM_FRAME_MS:
+            if self._utterance_cancelled():
+                return None
+            self._publish(pcm)
+            return time.monotonic()
+        clock = self._playback_clock
+        while not self._utterance_cancelled():
+            if not clock.lock.acquire(timeout=PACING_CANCEL_POLL_S):
+                continue
+            try:
+                if self._utterance_cancelled():
+                    return None
+                deadline = clock.tail_s + duration - MAX_PLAYBACK_LEAD_S
+                if deadline <= time.monotonic():
+                    self._publish(pcm)
+                    published_at = time.monotonic()
+                    clock.tail_s = max(clock.tail_s, published_at) + duration
+                    return published_at
+            finally:
+                clock.lock.release()
+            if not self._wait_until(deadline):
+                return None
+        return None
 
     def _utterance_cancelled(self) -> bool:
         return self._stop_event.is_set() or self._interrupt_event.is_set()
@@ -446,7 +506,7 @@ class _Vits2TTSNode(Node):
                         return False
                     now = time.monotonic()
                     if started is None:
-                        while not subscriber_gate_done.wait(timeout=0.05):
+                        while not subscriber_gate_done.wait(timeout=PACING_CANCEL_POLL_S):
                             if self._utterance_cancelled():
                                 return False
                         if "error" in subscriber_gate_result:
@@ -459,27 +519,30 @@ class _Vits2TTSNode(Node):
                             subscriber_count,
                         ) = subscriber_gate_result["value"]
                         if FIRST_FRAME_DELAY_MS:
-                            time.sleep(FIRST_FRAME_DELAY_MS / 1000.0)
+                            if not self._wait_until(
+                                time.monotonic() + FIRST_FRAME_DELAY_MS / 1000.0
+                            ):
+                                return False
                         now = time.monotonic()
                         # Backdate the schedule origin by the frames already
-                        # waiting in the prebuffer so every one of them is due
-                        # in the past and they go out in a single burst. The
-                        # consumer therefore starts holding PREBUFFER_FRAMES
-                        # worth of audio, and the frame after them is due one
-                        # interval from now — pacing continues untouched.
+                        # waiting in the prebuffer so they are eligible for an
+                        # initial burst. The topic clock further limits that
+                        # burst if the consumer still has the previous tail.
+                        # The next frame is due one interval from now.
                         started = now - max(0, len(prebuffer) - 1) * frame_interval
                     if frame_interval:
                         target = started + frames_sent * frame_interval
                         delay = target - now
                         if delay > 0:
-                            time.sleep(delay)
+                            if not self._wait_until(target):
+                                return False
                             burst_frames = 0
                         else:
                             # Behind schedule (a synthesis stall, a slow
                             # publish). Publishing immediately *is* the
-                            # catch-up: the schedule emits 100ms frames every
-                            # 70ms, so racing back onto it is what refills the
-                            # consumer's buffer. Rebasing `started` to `now`
+                            # catch-up: racing back onto the existing schedule
+                            # refills the consumer's buffer, subject to the
+                            # shared one-second cap. Rebasing `started` to `now`
                             # here — what this used to do unconditionally —
                             # threw the whole accumulated cushion away instead,
                             # so the next hiccup had nothing to absorb it and
@@ -493,8 +556,9 @@ class _Vits2TTSNode(Node):
                                 burst_frames = 0
                     if self._utterance_cancelled():
                         return False
-                    self._publish(frame)
-                    published_at = time.monotonic()
+                    published_at = self._publish_pcm_frame(frame)
+                    if published_at is None:
+                        return False
                     if first_published_at is None:
                         first_published_at = published_at
                     else:
@@ -701,8 +765,11 @@ class TTSPlugin:
         # node start/stop. See perception/README.md § Plugin Concurrency.
         self._state_lock = threading.RLock()
         self._nodes = {}
+        self._playback_clocks = {}
+        self._clock_cleanup_timer = None
         self._pending_starts = {}        # node_key -> input_topic
         self._pending_speech = {}        # node_key -> [(text, action_id), ...]
+        self._instance_errors = {}       # node_key -> (input_topic, reason)
         self._adapter = None
         self._adapter_state = "idle"     # idle|loading|ready|error
         self._load_error = None
@@ -742,12 +809,16 @@ class TTSPlugin:
             # Returns the engine directory of the family that matches the
             # TensorRT actually importable here, so the adapter never has to
             # guess between engines/jp61 and engines/jp511.
+            started = time.monotonic()
             cfg["engine_dir"] = ensure_vits2_model(
                 cfg.get("model_dir", "/models/vits2")
             )
+            log.info("[vits2_tts_trt] assets ready: elapsed=%.3fs", time.monotonic() - started)
+            started = time.monotonic()
             adapter = build_adapter(cfg)
             if not isinstance(adapter, Vits2TensorRTAdapter):
                 raise RuntimeError("Unexpected non-TensorRT VITS2 adapter")
+            log.info("[vits2_tts_trt] TensorRT engines loaded: elapsed=%.3fs", time.monotonic() - started)
             if cfg.get("warmup", True):
                 started = time.monotonic()
                 warmup_bytes = adapter.warmup()
@@ -789,15 +860,26 @@ class TTSPlugin:
                 if generation != self._load_generation or not self._pending_starts:
                     return
                 node_key, input_topic = next(iter(self._pending_starts.items()))
+                output_topic = f"{input_topic}/tts" if input_topic else "/perception/tts"
+                self._prune_playback_clocks_locked()
+                clock = self._playback_clocks.setdefault(output_topic, _PlaybackClock())
+                clock.users += 1
             try:
                 node = _Vits2TTSNode(
-                    input_topic or None, adapter, _node_suffix(node_key)
+                    input_topic or None, adapter, _node_suffix(node_key), clock
                 )
-            except Exception:  # noqa: BLE001 - keep serving the other instances
+                node._clock_lease_owner = self
+            except Exception as error:  # noqa: BLE001 - keep serving the other instances
                 log.exception("[vits2_tts_trt] failed to build instance %r", node_key)
                 with self._state_lock:
-                    self._pending_starts.pop(node_key, None)
-                    abandoned = self._take_pending_speech_locked([node_key])
+                    clock.users -= 1
+                    self._prune_playback_clocks_locked()
+                    abandoned = []
+                    if (generation == self._load_generation
+                            and self._pending_starts.get(node_key) == input_topic):
+                        self._instance_errors[node_key] = (input_topic, _error_chain(error))
+                        self._pending_starts.pop(node_key, None)
+                        abandoned = self._take_pending_speech_locked([node_key])
                 _release_actions(abandoned)
                 continue
             # Register before starting (README lifecycle rule): a started but
@@ -812,10 +894,11 @@ class TTSPlugin:
                 if still_wanted:
                     try:
                         self._executor.add_node(node)
-                    except Exception:  # noqa: BLE001
+                    except Exception as error:  # noqa: BLE001
                         log.exception(
                             "[vits2_tts_trt] failed to register instance %r", node_key
                         )
+                        self._instance_errors[node_key] = (input_topic, _error_chain(error))
                     else:
                         self._nodes[node_key] = node
                         committed = True
@@ -828,11 +911,14 @@ class TTSPlugin:
                 continue
             try:
                 node.start()
-            except Exception:  # noqa: BLE001
+            except Exception as error:  # noqa: BLE001
                 log.exception("[vits2_tts_trt] failed to start instance %r", node_key)
                 with self._state_lock:
-                    self._nodes.pop(node_key, None)
-                    abandoned = self._take_pending_speech_locked([node_key])
+                    abandoned = []
+                    if self._nodes.get(node_key) is node:
+                        self._instance_errors[node_key] = (input_topic, _error_chain(error))
+                        self._nodes.pop(node_key, None)
+                        abandoned = self._take_pending_speech_locked([node_key])
                 self._dispose_node(node, node_key)
                 _release_actions(abandoned)
                 continue
@@ -862,6 +948,45 @@ class TTSPlugin:
 
     # ── helpers ─────────────────────────────────────────────────────────
 
+    def _prune_playback_clocks_locked(self) -> None:
+        """Retain stopped topics only until their sent audio has drained.
+
+        Caller holds _state_lock. One daemon timer per plugin reclaims expired
+        idle entries even if no further start/stop arrives; active node clocks
+        remain present. There is no history or timer retained per retired topic.
+        """
+        now = time.monotonic()
+        next_expiry = None
+        for topic, clock in list(self._playback_clocks.items()):
+            if clock.users:
+                continue
+            with clock.lock:
+                tail = clock.tail_s
+            if tail <= now:
+                del self._playback_clocks[topic]
+            else:
+                next_expiry = tail if next_expiry is None else min(next_expiry, tail)
+        if next_expiry is not None and self._clock_cleanup_timer is None:
+            timer = threading.Timer(
+                max(0.001, next_expiry - now), self._cleanup_playback_clocks
+            )
+            timer.daemon = True
+            self._clock_cleanup_timer = timer
+            timer.start()
+
+    def _cleanup_playback_clocks(self) -> None:
+        with self._state_lock:
+            self._clock_cleanup_timer = None
+            self._prune_playback_clocks_locked()
+
+    def _release_playback_clock(self, node) -> None:
+        with self._state_lock:
+            if getattr(node, "_clock_lease_owner", None) is not self:
+                return
+            node._clock_lease_owner = None
+            node._playback_clock.users -= 1
+            self._prune_playback_clocks_locked()
+
     def _dispose_node(self, node, key):
         """Release a node after its caller has removed it from _nodes."""
         try:
@@ -877,6 +1002,8 @@ class TTSPlugin:
             node.destroy_node()
         except Exception:
             log.exception("[vits2_tts_trt] node destroy failed: %s", key)
+        finally:
+            self._release_playback_clock(node)
 
     def _identity(self, **extra) -> dict:
         base = {
@@ -939,6 +1066,8 @@ class TTSPlugin:
             adapter_state = self._adapter_state
             pending = bool(self._pending_starts)
             error = self._load_error
+            instance_errors = dict(self._instance_errors)
+            instance_error = instance_errors.get(instance_id)
             # An instance that started while the model loads has no node yet, and
             # info is routinely called without input_topic (Agent Core's start
             # sequencer does). Remembering the topic the pending start asked for
@@ -947,7 +1076,9 @@ class TTSPlugin:
             # dashboard subscribes to for its waveform. Same reason ocr.py keeps
             # its _pending_starts lookup.
             if instance_id and node is None and not input_topic:
-                input_topic = self._pending_starts.get(instance_id, "")
+                input_topic = self._pending_starts.get(
+                    instance_id, instance_error[0] if instance_error else ""
+                )
 
         if instance_id and node is not None:
             state = node.state
@@ -959,8 +1090,10 @@ class TTSPlugin:
         if instance_id:
             # Known instance that is not up yet: report the shared model state
             # so the dashboard shows "loading" instead of a misleading idle.
-            state = ("loading" if adapter_state == "loading"
+            state = ("error" if instance_error else "loading" if adapter_state == "loading"
                      else "error" if adapter_state == "error" else "idle")
+            if instance_error:
+                error = instance_error[1]
             output_topic = f"{input_topic}/tts" if input_topic else "/perception/tts"
             result = self._identity(
                 state=state,
@@ -968,7 +1101,8 @@ class TTSPlugin:
                           if input_topic else []),
                 topic_out=[{"topic": output_topic, "format": "audio/pcm-16k",
                             "desc": ""}],
-                desc=self._describe(state),
+                desc=(f"Instance start failed: {error}" if instance_error
+                      else self._describe(state)),
             )
             if state == "error" and error:
                 result["error"] = error
@@ -978,8 +1112,9 @@ class TTSPlugin:
             state = "running"
         elif adapter_state == "loading" or pending:
             state = "loading"
-        elif adapter_state == "error":
+        elif adapter_state == "error" or instance_errors:
             state = "error"
+            error = error or next(iter(instance_errors.values()))[1]
         else:
             state = "idle"
         topics_in = [{"topic": n._input_topic, "format": "data/json", "desc": ""}
@@ -996,12 +1131,17 @@ class TTSPlugin:
                                 topic_out=topics_out, desc=self._describe(state))
         if state == "error" and error:
             result["error"] = error
+        if instance_errors:
+            result["instance_errors"] = {key: item[1] for key, item in instance_errors.items()}
         return result
 
     def _start(self, args: dict, instance_id: str) -> dict:
         input_topic = args.get("input_topic") or ""
         key = instance_id or input_topic or "_default"
         with self._state_lock:
+            # An explicit start retries only this instance. A bad ROS topic or
+            # executor must not invalidate the shared, already-warmed adapter.
+            self._instance_errors.pop(key, None)
             node = self._nodes.get(key)
             stale = None
             if node is not None and input_topic and node._input_topic != input_topic:
@@ -1035,7 +1175,7 @@ class TTSPlugin:
         self._bring_up_pending(self._load_generation, adapter)
         with self._state_lock:
             node = self._nodes.get(key)
-            error = self._load_error
+            error = self._instance_errors.get(key, ("", self._load_error))[1]
         if node is None:
             return {"state": "error",
                     "message": error or "failed to start VITS2 instance"}
@@ -1043,6 +1183,10 @@ class TTSPlugin:
 
     def _stop(self, instance_id: str) -> dict:
         with self._state_lock:
+            if instance_id:
+                self._instance_errors.pop(instance_id, None)
+            else:
+                self._instance_errors.clear()
             keys = [instance_id] if instance_id else list(self._nodes)
             nodes = [(key, self._nodes.pop(key)) for key in keys if key in self._nodes]
             cancel = [instance_id] if instance_id else list(self._pending_starts)
@@ -1064,6 +1208,9 @@ class TTSPlugin:
 
         action_id = f"speak-{uuid.uuid4().hex[:8]}"
         with self._state_lock:
+            instance_error = self._instance_errors.get(instance_id or "_default")
+            if instance_error:
+                return {"state": "error", "message": instance_error[1]}
             node = next((n for n in self._nodes.values() if n.state == "running"), None)
             if node is None:
                 # Queue against the instance that will serve it and make sure a
@@ -1083,6 +1230,10 @@ class TTSPlugin:
         if adapter is not None:
             # Model is resident (a stopped instance, say) — start it now.
             self._bring_up_pending(self._load_generation, adapter)
+            with self._state_lock:
+                instance_error = self._instance_errors.get(key)
+            if instance_error:
+                return {"state": "error", "message": instance_error[1]}
         return {"status": "queued", "action_id": action_id, "text": text,
                 "state": "loading"}
 

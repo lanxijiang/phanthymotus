@@ -77,9 +77,11 @@ _inflect = inflect.engine()
 _comma_number_re = re.compile(r"([0-9][0-9\,]+[0-9])")
 _decimal_number_re = re.compile(r"([0-9]+\.[0-9]+)")
 _pounds_re = re.compile(r"£([0-9\,]*[0-9]+)")
-_dollars_re = re.compile(r"\$([0-9\.\,]*[0-9]+)")
+_dollars_re = re.compile(r"\$([0-9][0-9,]*(?:\.[0-9]+)?|\.[0-9]+)")
 _ordinal_re = re.compile(r"[0-9]+(st|nd|rd|th)")
 _number_re = re.compile(r"[0-9]+")
+_clock_time_re = re.compile(r"(?<![\w:])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9:])")
+_digit_words = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 
 _abbreviations = [
     (re.compile("\\b%s\\." % x[0], re.IGNORECASE), x[1])
@@ -135,7 +137,26 @@ def _remove_commas(m):
 
 
 def _expand_decimal_point(m):
-    return m.group(1).replace(".", " point ")
+    integer, fraction = m.group(1).split(".")
+    # Fractional digits are read individually: 3.05 is "three point zero five",
+    # not "three point five". Leave the integer for the cardinal pass below.
+    expanded = integer + " point " + " ".join(_digit_words[int(d)] for d in fraction)
+    if m.end() < len(m.string) and m.string[m.end()].isascii() and m.string[m.end()].isalpha():
+        expanded += " "  # 3.5kilograms must not become "fivekilograms".
+    return expanded
+
+
+def _expand_clock_time(m):
+    hour = _inflect.number_to_words(int(m.group(1)), andword="")
+    minute = int(m.group(2))
+    if minute == 0:
+        expanded = hour + " o'clock"
+    else:
+        prefix = "oh " if minute < 10 else ""
+        expanded = hour + " " + prefix + _inflect.number_to_words(minute, andword="")
+    if m.end() < len(m.string) and m.string[m.end()].isascii() and m.string[m.end()].isalpha():
+        expanded += " "  # Keep an attached AM/PM suffix separate.
+    return expanded
 
 
 def _expand_dollars(m):
@@ -144,7 +165,10 @@ def _expand_dollars(m):
     if len(parts) > 2:
         return match + " dollars"
     dollars = int(parts[0]) if parts[0] else 0
-    cents = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+    if len(parts) > 1 and len(parts[1]) > 2:
+        # Preserve fractional cents as a decimal dollar amount.
+        return match + " dollars"
+    cents = int(parts[1].ljust(2, "0")) if len(parts) > 1 and parts[1] else 0
     if dollars and cents:
         dollar_unit = "dollar" if dollars == 1 else "dollars"
         cent_unit = "cent" if cents == 1 else "cents"
@@ -179,6 +203,8 @@ def _expand_number(m):
 
 
 def normalize_numbers(text):
+    # Consume the colon before punctuation normalization turns it into a pause.
+    text = re.sub(_clock_time_re, _expand_clock_time, text)
     text = re.sub(_comma_number_re, _remove_commas, text)
     text = re.sub(_pounds_re, r"\1 pounds", text)
     text = re.sub(_dollars_re, _expand_dollars, text)

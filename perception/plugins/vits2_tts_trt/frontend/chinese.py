@@ -285,15 +285,54 @@ def text_normalize(text):
     return text
 
 
+def _normalize_mixed_preserving_english(text):
+    """Keep the Chinese math rule for ``log`` out of ordinary English words.
+
+    The pinned Chinese FST rewrites ``log`` even inside ``kilograms``,
+    ``catalog`` or ``login``. Protect only the complete Latin words affected
+    by that rule; normalize all intervening text with the original FST. A
+    standalone ``log`` (including ``log(10)``) still takes the math path, and
+    number/unit expressions such as ``3.5kg`` and ``2GB/秒`` stay together.
+    """
+    protected = [
+        match for match in re.finditer(r"[A-Za-z]+", text)
+        if "log" in match.group().lower() and match.group().lower() != "log"
+    ]
+    if not protected:
+        return _normalizer.normalize(text)
+
+    def normalize_fragment(fragment):
+        if not fragment:
+            return ""
+        result = _normalizer.normalize(fragment)
+        # A graph may trim edge whitespace when called on a fragment. Preserve
+        # that word boundary so "open catalog now" cannot become one word.
+        if fragment[0].isspace() and not result[:1].isspace():
+            result = " " + result
+        if fragment[-1].isspace() and not result[-1:].isspace():
+            result += " "
+        return result
+
+    parts = []
+    cursor = 0
+    for match in protected:
+        parts.append(normalize_fragment(text[cursor:match.start()]))
+        parts.append(match.group())
+        cursor = match.end()
+    parts.append(normalize_fragment(text[cursor:]))
+    return "".join(parts)
+
+
 def mix_normalize(text: str) -> str:
     """Normalise text for ZH/EN mixed input.
 
-    Keep the complete mixed-language context so WeText can expand acronyms
-    such as ``AI`` and ``CTO`` into letter-by-letter forms before G2P.
+    Keep mixed-language context for unaffected spans so WeText can expand
+    acronyms such as ``AI`` and ``CTO`` before G2P. Protect English words
+    containing ``log`` from the Chinese math rule.
     """
     from .english import replace_punctuation as en_replace_punct
     text = _remove_redundant_newlines_after_punctuation(text)
-    text = _normalizer.normalize(text)
+    text = _normalize_mixed_preserving_english(text)
     text = _post_replace(text)
     text = en_replace_punct(text)
     return text
