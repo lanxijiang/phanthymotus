@@ -1,0 +1,14 @@
+# Isolated Orin build/test image. Mount this personal checkout at /src and
+# verified MOSS assets at /moss; model files and plans stay outside the image.
+# Use the same GPU/TensorRT stack as the eventual candidate runtime.
+ARG MOSS_TEST_BASE=bj-warehouse.tencentcloudcr.com/phanthy-motus/perception:release.261010.37994d2-jetson-jp6.1
+FROM ${MOSS_TEST_BASE}
+USER root
+ARG PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
+RUN python3 -m pip install --no-cache-dir --no-deps --only-binary=:all: \
+        -i ${PYPI_MIRROR} \
+        protobuf==4.25.3 onnx==1.17.0 sentencepiece==0.2.0 && \
+    python3 -c "import numpy, onnx, sentencepiece; print('MOSS build dependencies:', numpy.__version__, onnx.__version__, sentencepiece.__version__)"
+WORKDIR /src
+ENTRYPOINT ["/bin/bash", "-lc"]
+CMD ["source /etc/dla-fallback.env; export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1; python3 perception/tools/moss_build_trt.py --help"]

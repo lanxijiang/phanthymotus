@@ -67,10 +67,11 @@ plugins:
     enabled: true
     engine: moss-multi
     backend: trt
-    model_dir: /models/moss/assets
-    # Verified JuiceFS archive of the original MOSS assets and ONNX graphs.
-    # Orin TensorRT plans must still be built and staged before TTS can start.
-    moss_asset_url: "http://172.28.4.81:34567/i-lanxijiang/phanthymotus-tts/moss-orin-assets.tar"
+    # Release-specific cache avoids reusing the earlier ONNX-only archive.
+    model_dir: /models/moss-frame-v4/assets
+    # Original MOSS assets plus validated Orin TRT 10.4.0 plans and TN cache.
+    # The archive hash and size are pinned in plugins/moss_assets.py.
+    moss_asset_url: "http://172.28.4.81:34567/i-lanxijiang/phanthymotus-tts/moss-orin-jp61-frame-v4-20261010.tar"
     moss_language: auto
     # Judgeflow launches three perception containers; one runtime in each gives
     # three concurrent model instances on the shared Orin.
@@ -107,16 +108,8 @@ plugins:
     # never loads the CUDA provider and so never touches the shared bridge.
     japanese_worker: true
     japanese_worker_device: gpu
-    # matcha-zh-en / mms-th / kokoro-multi only — vits2-zh-en runs on TensorRT and
-    # ignores this. Matcha is fp32, so both devices load the same weights and only
-    # the provider changes; gpu measured ~4.3x faster at num_threads=2.
-    #
-    # Left unset for kokoro-multi on purpose: it is the one engine whose two
-    # devices load *different weight files* (fp32 on gpu, int8 on cpu, because the
-    # CUDA provider falls back per node on quantised ops), so it carries its own
-    # default in ENGINE_DEVICE_DEFAULTS — gpu. An explicit `cpu` here would apply
-    # to every engine and quietly override that.
-    device: cpu
+    # MOSS uses TensorRT on GPU 0; no CPU model inference fallback.
+    device: gpu
     # kokoro-multi only: pronunciation language. One of en-us, en-gb, zh, ja, es,
     # fr, it, pt-br, hi — every language Kokoro v1.0 has voices for. Read per
     # generate() call, so changing it costs nothing.

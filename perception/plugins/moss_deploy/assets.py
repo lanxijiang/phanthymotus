@@ -5,11 +5,67 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib
+import importlib.util
 import json
 import re
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+
+
+_SOURCE_IMPORT_LOCK = threading.RLock()
+
+
+def _compile_original_tts_source(path: Path):
+    """Defer only reviewed reference-audio dependencies in memory.
+
+    The original ONNX runtime uses torch/torchaudio solely to read and resample
+    custom reference audio. Built-in voices use verified cached codec tokens.
+    Move the two imports into that method, retaining its computation statements
+    without writing the source file or substituting modules. Fail closed if a newer
+    source starts using either dependency anywhere else.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    dependencies = {"torch", "torchaudio"}
+    imports = []
+    for node in tree.body:
+        if isinstance(node, ast.Import) and any(alias.name in dependencies for alias in node.names):
+            if len(node.names) != 1 or node.names[0].asname is not None:
+                raise ValueError("Unsupported original MOSS audio dependency import")
+            imports.append(node)
+    if sorted(node.names[0].name for node in imports) != sorted(dependencies):
+        raise ValueError("Expected original MOSS torch and torchaudio imports")
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "OnnxTtsRuntime"]
+    methods = [node for cls in classes for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_load_reference_audio"]
+    if len(classes) != 1 or len(methods) != 1:
+        raise ValueError("Expected one original MOSS reference-audio loader")
+    method = methods[0]
+    allowed_names = {
+        id(node) for statement in method.body for node in ast.walk(statement)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in dependencies:
+            if id(node) not in allowed_names:
+                raise ValueError(f"Original MOSS dependency {node.id} is used outside the reference-audio loader")
+            used.add(node.id)
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and dependencies.intersection(node.names):
+            raise ValueError("Unsupported original MOSS audio dependency binding")
+        if isinstance(node, ast.arg) and node.arg in dependencies:
+            raise ValueError("Unsupported original MOSS audio dependency argument")
+        if isinstance(node, ast.Import) and any(alias.name.split(".")[0] in dependencies or alias.asname in dependencies for alias in node.names) and node not in imports:
+            raise ValueError("Unsupported additional original MOSS audio dependency import")
+        if isinstance(node, ast.ImportFrom) and ((node.module or "").split(".")[0] in dependencies or any(alias.name in dependencies or alias.asname in dependencies for alias in node.names)):
+            raise ValueError("Unsupported original MOSS audio dependency import-from")
+    if used != dependencies:
+        raise ValueError("Original MOSS reference-audio dependency usage has changed")
+    tree.body = [node for node in tree.body if node not in imports]
+    # Preserve a potential docstring as the first statement.
+    insert_at = int(bool(method.body and isinstance(method.body[0], ast.Expr) and isinstance(method.body[0].value, ast.Constant) and isinstance(method.body[0].value.value, str)))
+    method.body[insert_at:insert_at] = imports
+    return compile(ast.fix_missing_locations(tree), str(path), "exec")
 
 
 def _literal_assignment(path: Path, name: str):
@@ -21,15 +77,28 @@ def _literal_assignment(path: Path, name: str):
 
 
 def load_original_source(source_dir: Path):
-    """Import reviewed local code without constructing its auto-download path."""
+    """Import reviewed code; custom-reference audio dependencies load on demand."""
     source_dir = source_dir.resolve()
-    for name in ("ort_cpu_runtime", "onnx_tts_runtime"):
-        existing = sys.modules.get(name)
-        if existing is not None and Path(existing.__file__).resolve().parent != source_dir:
-            raise RuntimeError(f"Another MOSS source directory is already imported for {name}")
-    if str(source_dir) not in sys.path:
-        sys.path.insert(0, str(source_dir))
-    return importlib.import_module("onnx_tts_runtime"), importlib.import_module("ort_cpu_runtime")
+    with _SOURCE_IMPORT_LOCK:
+        for name in ("ort_cpu_runtime", "onnx_tts_runtime"):
+            existing = sys.modules.get(name)
+            if existing is not None and Path(existing.__file__).resolve().parent != source_dir:
+                raise RuntimeError(f"Another MOSS source directory is already imported for {name}")
+        if str(source_dir) not in sys.path:
+            sys.path.insert(0, str(source_dir))
+        name = "onnx_tts_runtime"
+        if name not in sys.modules:
+            path = source_dir / f"{name}.py"
+            code = _compile_original_tts_source(path)
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            try:
+                exec(code, module.__dict__)
+            except BaseException:
+                sys.modules.pop(name, None)
+                raise
+        return sys.modules[name], importlib.import_module("ort_cpu_runtime")
 
 
 def load_original_prompting(path: Path):

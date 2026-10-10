@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import copy
+import os
 import threading
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 from typing import Callable
 
 import numpy as np
@@ -15,6 +16,7 @@ from .assets import load_original_prompting, load_original_source
 from .chunking import prompt_text_capacity, split_preserving_boundaries
 from .si_units import prepare_with_si_unit_guard
 from .pool import SessionAdapter, SharedGraphPool
+from .selected_logits import SelectedAudioScores, wrap_selected_outputs
 
 
 GENERATION_DEFAULTS = {
@@ -29,6 +31,84 @@ GENERATION_DEFAULTS = {
     "audio_top_k": 25,
     "audio_repetition_penalty": 1.2,
 }
+
+
+_FRAME_SAMPLING_KEYS = (
+    "text_temperature", "text_top_p", "text_top_k", "audio_temperature",
+    "audio_top_p", "audio_top_k", "audio_repetition_penalty",
+)
+
+
+def _validate_frame_sampling(defaults, contract):
+    expected = contract["generation_defaults"]
+    mismatches = [key for key in _FRAME_SAMPLING_KEYS
+                  if key not in expected or defaults.get(key) != expected[key]]
+    if defaults.get("sample_mode") != "full" or defaults.get("do_sample") is not True:
+        mismatches.append("sample_mode=full/do_sample=True")
+    if mismatches:
+        raise ValueError("Fused frame sampling does not match its validated contract: "
+                         + ", ".join(mismatches))
+
+
+def _make_frame_generation_method(original_method, contract):
+    """Select the original fused branch without changing public full sampling.
+
+    The closure owns its globals: source modules, other runtimes and their
+    sampling-mode constants retain their original values.
+    """
+    if not isinstance(original_method, FunctionType):
+        raise TypeError("Expected the original Python MOSS generation method")
+    namespace = dict(original_method.__globals__)
+    if namespace.get("SAMPLE_MODE_FIXED") != "fixed":
+        raise ValueError("Original MOSS fixed-frame generation branch has changed")
+    namespace["SAMPLE_MODE_FIXED"] = "full"
+    generate = FunctionType(original_method.__code__, namespace,
+                            original_method.__name__, original_method.__defaults__,
+                            original_method.__closure__)
+    generate.__kwdefaults__ = original_method.__kwdefaults__
+
+    def generate_frames(self, request_rows, on_frame=None):
+        _validate_frame_sampling(self.manifest["generation_defaults"], contract)
+        if "local_fixed_sampled_frame" not in self.sessions:
+            raise RuntimeError("Fused frame contract has no matching session")
+        return generate(self, request_rows, on_frame=on_frame)
+
+    return generate_frames
+
+
+def _run_sampled_frame(runtime, global_hidden, *, previous_token_sets_by_channel):
+    """Run one frame; consume only the assistant draw when generation stops."""
+    n_vq = int(runtime.manifest["tts_config"]["n_vq"])
+    if n_vq != 16 or len(previous_token_sets_by_channel) != n_vq:
+        raise ValueError("Fused frame requires the original 16 audio codebooks")
+    hidden = np.asarray(global_hidden, dtype=np.float32)
+    if hidden.shape != (1, 768):
+        raise ValueError("Fused frame global_hidden must have shape [1,768]")
+    initial_rng_state = copy.deepcopy(runtime.rng.bit_generator.state)
+    assistant_u = float(runtime.rng.random())
+    after_assistant = copy.deepcopy(runtime.rng.bit_generator.state)
+    draws = [assistant_u] + [float(runtime.rng.random()) for _ in range(n_vq)]
+    random_u = np.clip(np.asarray([draws], dtype=np.float32), 0.0, 0.99999994)
+    try:
+        session = runtime.sessions["local_fixed_sampled_frame"]
+        outputs = session.run(None, {"global_hidden": hidden, "random_u": random_u})
+        names = [output.name for output in session.get_outputs()]
+        named = dict(zip(names, outputs, strict=True))
+        continuation = np.asarray(named["should_continue"])
+        tokens = np.asarray(named["frame_token_ids"])
+        if (continuation.shape != (1, 1) or tokens.shape != (1, n_vq)
+                or not np.issubdtype(continuation.dtype, np.integer)
+                or not np.issubdtype(tokens.dtype, np.integer)):
+            raise ValueError("Fused frame returned invalid integer output shapes or dtypes")
+        if not np.isin(continuation, [0, 1]).all() or np.any(tokens < 0) or np.any(tokens >= 1024):
+            raise ValueError("Fused frame returned out-of-range continuation or audio tokens")
+        should_continue = bool(continuation[0, 0])
+        if not should_continue:
+            runtime.rng.bit_generator.state = after_assistant
+        return should_continue, [int(token) for token in tokens[0]]
+    except BaseException:
+        runtime.rng.bit_generator.state = initial_rng_state
+        raise
 
 
 def _require_full_codec_decoder(pool: SharedGraphPool) -> None:
@@ -59,8 +139,13 @@ class _ObservedStreamingCodec:
 def _create_original_adapter_class(pool: SharedGraphPool):
     assets = pool.assets
     original, original_ort = load_original_source(assets.source_dir)
+    use_fast_sampling = os.environ.get("MOSS_FAST_SAMPLING", "1") == "1"
+    frame_contract = getattr(pool, "frame_contract", None)
 
     class AdaptedMossRuntime(original.OnnxTtsRuntime):
+        fast_sampling_enabled = use_fast_sampling
+        fused_frame_enabled = frame_contract is not None
+
         def __init__(self, instance_id: str, seed: int, output_dir: Path):
             # Intentionally bypass the upstream constructor's browser asset
             # downloader and its incompatible split graph session factory.
@@ -113,7 +198,8 @@ def _create_original_adapter_class(pool: SharedGraphPool):
 
             def decode(feeds):
                 ids = np.asarray(feeds["input_ids"], dtype=np.int32)
-                past = {name: np.asarray(feeds[name], dtype=np.float32) for name in global_past}
+                past = {name: (feeds[name] if getattr(feeds[name], "_moss_device_tensor", False)
+                               else np.asarray(feeds[name], dtype=np.float32)) for name in global_past}
                 lengths = {array.shape[1] for array in past.values()}
                 if len(lengths) != 1:
                     raise ValueError("Global KV cache lengths do not agree")
@@ -139,13 +225,23 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 outputs = self.client.run("codec_decoder", {"audio_codes": codes, "audio_codes_lengths": np.asarray(feeds["audio_code_lengths"], dtype=np.int64)})
                 return {"audio": np.asarray(outputs["waveform"], dtype=np.float32), "audio_lengths": np.asarray(outputs["waveform_lengths"], dtype=np.int32)}
 
+            def local_step(feeds):
+                outputs = self.client.run("local_cached_step", feeds)
+                contract = getattr(pool, "selected_local_contract", None)
+                return wrap_selected_outputs(outputs, feeds, contract) if contract else outputs
+
             self.sessions = {
                 "prefill": SessionAdapter(self.client, "global_unified", global_outputs, prefill),
                 "decode": SessionAdapter(self.client, "global_unified", global_outputs, decode),
-                "local_cached_step": SessionAdapter(self.client, "local_cached_step", local_outputs),
+                "local_cached_step": SessionAdapter(self.client, "local_cached_step", local_outputs, local_step),
                 "codec_encode": SessionAdapter(self.client, "codec_encoder", ["audio_codes", "audio_code_lengths"], encode),
                 "codec_decode": SessionAdapter(self.client, "codec_decoder", ["audio", "audio_lengths"], codec_decode),
             }
+            if frame_contract is not None:
+                self.sessions["local_fixed_sampled_frame"] = SessionAdapter(
+                    self.client, "local_fixed_sampled_frame",
+                    ["should_continue", "frame_token_ids", "text_logits", "audio_logits"],
+                )
             self.codec_streaming_session = None
             self._active_reference_codes = None
             self._request_audio_callback = None
@@ -160,6 +256,17 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 step = SessionAdapter(self.client, "codec_decode_step", output_names)
                 self.sessions["codec_decode_step"] = step
                 self.codec_streaming_session = _ObservedStreamingCodec(original_ort.CodecStreamingDecodeSession(self.codec_meta, step))
+
+        def slice_audio_channel_logits(self, audio_logits, channel_index):
+            if isinstance(audio_logits, SelectedAudioScores):
+                return audio_logits.for_channel(channel_index)
+            return super().slice_audio_channel_logits(audio_logits, channel_index)
+
+        def run_local_fixed_sampled_frame(self, global_hidden, *, previous_token_sets_by_channel):
+            return _run_sampled_frame(
+                self, global_hidden,
+                previous_token_sets_by_channel=previous_token_sets_by_channel,
+            )
 
         def prepare_synthesis_text(self, *, text, voice="", prompt_text="", enable_wetext=True, enable_normalize_tts_text=True):
             return prepare_with_si_unit_guard(
@@ -233,7 +340,11 @@ def _create_original_adapter_class(pool: SharedGraphPool):
             rows = self.build_voice_clone_request_rows(codes, self.encode_text("你好。"))
             outputs = self.sessions["prefill"].run(None, {"input_ids": np.asarray([rows["inputIds"]], dtype=np.int32), "attention_mask": np.asarray(rows["attentionMask"], dtype=np.int32)})
             hidden = original_ort._extract_last_hidden(outputs[0])
-            self.run_local_cached_step(hidden, text_token_id=0, audio_token_id=0, channel_index=0, step_type=0, past_valid_lengths=0, local_past_by_name=self.create_empty_local_cached_past())
+            if frame_contract is not None:
+                _validate_frame_sampling(self.manifest["generation_defaults"], frame_contract)
+                self.run_local_fixed_sampled_frame(hidden, previous_token_sets_by_channel=[set() for _ in range(16)])
+            else:
+                self.run_local_cached_step(hidden, text_token_id=0, audio_token_id=0, channel_index=0, step_type=0, past_valid_lengths=0, local_past_by_name=self.create_empty_local_cached_past())
             if "codec_decoder" in getattr(pool, "omitted_graphs", {}):
                 self.codec_streaming_session.reset()
                 try:
@@ -252,6 +363,13 @@ def _create_original_adapter_class(pool: SharedGraphPool):
             self._previous_stream_chunk_text = text
             return result
 
+    if use_fast_sampling:
+        from .sampling import make_fast_generation_method
+        AdaptedMossRuntime.generate_audio_frames = make_fast_generation_method(
+            original_ort.OrtCpuRuntime.generate_audio_frames)
+    if frame_contract is not None:
+        AdaptedMossRuntime.generate_audio_frames = _make_frame_generation_method(
+            AdaptedMossRuntime.generate_audio_frames, frame_contract)
     return AdaptedMossRuntime
 
 
@@ -324,4 +442,4 @@ class MossRuntime:
                 self._runtime._request_audio_callback = None
 
     def state_summary(self) -> dict:
-        return {"instance_id": self.instance_id, "backend": self.pool.backend, "shared_graph_weights": True, "independent_rng": True, "global_local_kv_scope": "request-local", "codec_cache_scope": "instance-local", "streaming_codec_available": self._runtime.codec_streaming_session is not None, "full_codec_decoder_available": "codec_decoder" not in getattr(self.pool, "omitted_graphs", {}), "context_allocation": "lazy" if hasattr(self.pool, "instance_sessions") else "shared stateless ONNX sessions", "encoder_context_mode": getattr(self.pool, "encoder_context_mode", "shared stateless ONNX session"), "custom_reference_encoding_available": "codec_encoder" not in getattr(self.pool, "omitted_graphs", {}), "generation_defaults": copy.deepcopy(self._runtime.manifest["generation_defaults"])}
+        return {"instance_id": self.instance_id, "backend": self.pool.backend, "shared_graph_weights": True, "independent_rng": True, "global_local_kv_scope": "request-local", "codec_cache_scope": "instance-local", "streaming_codec_available": self._runtime.codec_streaming_session is not None, "full_codec_decoder_available": "codec_decoder" not in getattr(self.pool, "omitted_graphs", {}), "context_allocation": "lazy" if hasattr(self.pool, "instance_sessions") else "shared stateless ONNX sessions", "encoder_context_mode": getattr(self.pool, "encoder_context_mode", "shared stateless ONNX session"), "custom_reference_encoding_available": "codec_encoder" not in getattr(self.pool, "omitted_graphs", {}), "generation_defaults": copy.deepcopy(self._runtime.manifest["generation_defaults"]), "effective_optimizations": {"resident_state": bool(getattr(self.pool, "resident_state_enabled", False)), "fast_sampling": self._runtime.fast_sampling_enabled, "fused_frame": self._runtime.fused_frame_enabled}}

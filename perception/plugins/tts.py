@@ -1372,6 +1372,11 @@ class _TTSNode(Node):
         self._input_topic  = input_topic or ''
         self._output_topic = f"{input_topic}/tts" if input_topic else '/perception/tts'
         self._adapter      = adapter
+        self._audio_pacer = None
+        transport_lead = getattr(adapter, "transport_lead_seconds", None)
+        if transport_lead is not None:
+            from plugins.moss_pacing import BoundedAudioPacer
+            self._audio_pacer = BoundedAudioPacer(transport_lead)
         self.state         = "idle"
         self._text_queue   = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
@@ -1565,7 +1570,11 @@ class _TTSNode(Node):
                     self._pub.publish(msg)
                     frames_sent += 1
 
-                def emit(frame: bytes) -> None:
+                def cancelled_publish() -> bool:
+                    return (self._stop_event.is_set() or self._interrupt_flag.is_set()
+                            or utterance_abort.is_set())
+
+                def emit(frame: bytes) -> bool:
                     """Pace and publish one frame; latches the clock on the first."""
                     nonlocal t0, t0_wall
                     if t0 is None:
@@ -1576,6 +1585,8 @@ class _TTSNode(Node):
                         t0 = now - max(0, len(prebuf) - 1) * FRAME_INTERVAL_S
                         t0_wall = _time.time()
                         fire_hook("on_speaking")
+                    if self._audio_pacer is not None:
+                        return self._audio_pacer.publish_frame(frame, publish, cancelled_publish)
                     target = t0 + frames_sent * FRAME_INTERVAL_S
                     now = _time.monotonic()
                     if now < target:
@@ -1583,11 +1594,14 @@ class _TTSNode(Node):
                     # No rebase when behind: publishing immediately is the
                     # catch-up, since the schedule is already ahead of realtime.
                     publish(frame)
+                    return True
 
-                def flush_prebuf() -> None:
+                def flush_prebuf() -> bool:
                     while prebuf:
-                        emit(prebuf[0])
+                        if not emit(prebuf[0]):
+                            return False
                         prebuf.pop(0)
+                    return True
 
                 # 分段：超过 280 字按标点切分，避免超长合成导致延迟或失败。分段是
                 # 合成的实现细节 —— pacing/prebuffer/EOF 都跨段延续，下游看到的
@@ -1659,9 +1673,13 @@ class _TTSNode(Node):
                     if t0 is None:
                         prebuf.append(frame)
                         if len(prebuf) >= PREBUF_FRAMES:
-                            flush_prebuf()
+                            if not flush_prebuf():
+                                interrupted = True
+                                break
                         continue
-                    emit(frame)
+                    if not emit(frame):
+                        interrupted = True
+                        break
 
                 cancelled = self._stop_event.is_set() or self._interrupt_flag.is_set()
                 synth_thread.join(timeout=5)
@@ -1670,16 +1688,20 @@ class _TTSNode(Node):
                 total = synth_state["total"]  # read after join, not concurrently
                 # Flush any remaining pre-buffer (utterances < PREBUF_FRAMES)
                 if prebuf and not cancelled:
-                    flush_prebuf()
+                    if not flush_prebuf():
+                        cancelled = True
 
                 # flush remainder
                 if buf and not cancelled:
-                    if t0 is not None:
-                        target = t0 + frames_sent * FRAME_INTERVAL_S
-                        now = _time.monotonic()
-                        if now < target:
-                            _time.sleep(target - now)
-                    publish(buf)
+                    if self._audio_pacer is not None:
+                        self._audio_pacer.publish_frame(buf, publish, cancelled_publish)
+                    else:
+                        if t0 is not None:
+                            target = t0 + frames_sent * FRAME_INTERVAL_S
+                            now = _time.monotonic()
+                            if now < target:
+                                _time.sleep(target - now)
+                        publish(buf)
 
                 # Capture before clearing: reading the flag after the clear below
                 # made this always False, so an interrupted utterance reported ACP
@@ -1853,7 +1875,8 @@ class SherpaOnnxTTSPlugin:
         # RLock: dispatch paths nest (start → _dispose_node).
         self._nodes_lock = threading.RLock()
         self._executor = executor
-        log.info(f"[tts] plugin init: sherpa-onnx VITS, "
+        log.info(f"[tts] plugin init: engine={plugin_cfg.get('engine', 'unspecified')}, "
+                 f"adapter={type(self._adapter).__name__ if self._adapter is not None else 'unavailable'}, "
                  f"speaker_id={plugin_cfg.get('speaker_id', 0)}, speed={plugin_cfg.get('speed', 1.0)}")
 
     def _dispose_node(self, node: _TTSNode, key: str = "") -> dict:
@@ -2068,8 +2091,22 @@ class SherpaOnnxTTSPlugin:
                             else 'tts_language' if cfg.get('tts_language') else None)
             language = str(cfg[language_key]) if language_key else None
 
+            # MOSS built-in speakers are already verified cached reference
+            # codes. Selecting one must not allocate another TensorRT pool.
+            # Keep speaker_id a session key for every other engine.
+            speaker_setter = (getattr(self._adapter, "set_speaker_id", None)
+                              if self._cfg.get("engine") == "moss-multi" else None)
+            cheap_speaker = callable(speaker_setter) and 'speaker_id' in cfg
+            if cheap_speaker:
+                validator = getattr(self._adapter, "validate_speaker_id", None)
+                if callable(validator):
+                    validator(cfg['speaker_id'])
             needs_rebuild = any(self._cfg.get(key) != value
-                                for key, value in incoming.items())
+                                for key, value in incoming.items()
+                                if not (cheap_speaker and key == 'speaker_id'))
+            if cheap_speaker and not needs_rebuild:
+                # Validation/setter failures leave the persisted config intact.
+                speaker_setter(cfg['speaker_id'])
             self._cfg.update(incoming)
             # Both of these have to be written back explicitly, because they are
             # absent from `incoming` by design and _build_tts_adapter reads them out
@@ -2178,7 +2215,7 @@ ENGINE_MODEL_DIRS = {
     # it: the two devices load different weight files (fp32 vs int8), so they are
     # separate downloads that must not overwrite each other.
     "kokoro-multi": "/models/kokoro-multi",
-    "moss-multi": "/models/moss/assets",
+    "moss-multi": "/models/moss-frame-v4/assets",
 }
 # Where an engine wants to run when nothing has been configured. Only Kokoro
 # differs: it is a 310 MB fp32 graph on gpu and the CUDA provider is worth having,
@@ -2462,6 +2499,17 @@ class TTSPlugin:
         requested = args.get("tts_engine") or args.get("engine")
         forwarded = {k: v for k, v in args.items()
                      if k not in ("tts_engine", "engine")}
+        # The facade also persists shared fields. Validate a resident MOSS
+        # speaker before either config dictionary can record an invalid value.
+        # Other engines and actual engine switches keep their existing path.
+        if 'speaker_id' in args:
+            with self._lock:
+                same_moss = (self._engine == "moss-multi"
+                             and (not requested or self._select_engine(requested) == "moss-multi"))
+                adapter = getattr(self._impl, "_adapter", None) if same_moss else None
+                validator = getattr(adapter, "validate_speaker_id", None)
+                if callable(getattr(adapter, "set_speaker_id", None)) and callable(validator):
+                    validator(args['speaker_id'])
         for key in SHARED_CONFIG_KEYS:
             if key in args:
                 self._cfg[key] = args[key]

@@ -1,7 +1,7 @@
 """Install the pinned MOSS asset archive into the shared /models cache.
 
-The archive contains ONNX graphs, metadata and reference voices. Jetson
-TensorRT plans are a separate, target-specific artifact and are not in it.
+The archive contains original ONNX assets and reference voices, the verified
+Orin TensorRT 10.4 plans, their provenance, and the tested Chinese TN cache.
 No network request is made unless a URL is explicitly supplied.
 """
 
@@ -21,8 +21,8 @@ from pathlib import Path, PurePosixPath
 
 # SHA and byte count of the reviewed portable bundle. Rebuilding the bundle
 # requires reviewing these pins in the project code before deployment.
-ASSET_SHA256 = "2c17a83c412eeafc193a879fee97b232a25761499e5edc686fcd201d3137d533"
-ASSET_BYTES = 676638720
+ASSET_SHA256 = "1538144d7365ef74af7828a49fb9d02da7130f6abd7b3e8f61f56e87713d2a74"
+ASSET_BYTES = 1169192960
 ASSET_HOST = "172.28.4.81"
 ASSET_PORT = 34567
 READY_FILE = ".moss-assets-ready.json"
@@ -31,6 +31,13 @@ REQUIRED_FILES = (
     "engine-map.json",
     "onnx/codec/codec_browser_onnx_meta.json",
     "source/MOSS-TTS-Nano/onnx_tts_runtime.py",
+    "release-manifest.json",
+    "frame-candidate.json",
+    "plans/global_unified/global_unified.plan",
+    "plans/codec_decode_step/codec_decode_step.plan",
+    "plans/local_fixed_sampled_frame/local_fixed_sampled_frame.plan",
+    "plans/local_fixed_sampled_frame/build_report.json",
+    "candidates/frame-v4/frame-contract.json",
 )
 
 

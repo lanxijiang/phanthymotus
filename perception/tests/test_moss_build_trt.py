@@ -134,3 +134,67 @@ def test_failed_publication_removes_plans_from_current_attempt(builder, monkeypa
         builder.main()
     assert not list(output.rglob("*.plan"))
     assert json.loads((output / "build_report.json").read_text())["status"] == "failed"
+
+
+@pytest.mark.parametrize("mode", ["default", "weak", "strong"])
+def test_real_build_branch_honors_explicit_types_without_precision_overrides(builder, monkeypatch, tmp_path, mode):
+    """Exercise build(), not a replacement build function; GPU API is mocked."""
+    events = SimpleNamespace(flags=[], cleared=[], callbacks=[], network_flags=None)
+    unary = SimpleNamespace(type="unary", num_inputs=1, precision=None,
+                            get_input=lambda _: SimpleNamespace(dtype="float32"))
+    network = SimpleNamespace(num_layers=1, num_inputs=0, get_layer=lambda _: unary)
+    config = SimpleNamespace(set_memory_pool_limit=lambda *_: None,
+                              set_flag=lambda value: events.flags.append(value),
+                              clear_flag=lambda value: events.cleared.append(value))
+    class Logger:
+        WARNING = 2
+        def __init__(self, _level):
+            pass
+    class Builder:
+        # A strongly typed model does not query this weakly typed capability
+        # flag; the ONNX graph determines whether FP16 operations are needed.
+        platform_has_fast_fp16 = mode != "strong"
+        def __init__(self, _logger):
+            pass
+        def create_network(self, flags):
+            events.network_flags = flags
+            return network
+        def create_builder_config(self):
+            return config
+        def create_optimization_profile(self):
+            return object()
+        def build_serialized_network(self, passed_network, passed_config):
+            assert passed_network is network and passed_config is config
+            return b"target-specific mocked engine"
+    trt = SimpleNamespace(Logger=Logger, Builder=Builder,
+        NetworkDefinitionCreationFlag=SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
+        OnnxParser=lambda *_: SimpleNamespace(parse_from_file=lambda _: True),
+        MemoryPoolType=SimpleNamespace(WORKSPACE=0),
+        BuilderFlag=SimpleNamespace(TF32="tf32", FP16="fp16", PREFER_PRECISION_CONSTRAINTS="prefer"),
+        LayerType=SimpleNamespace(UNARY="unary"), float16="float16", float32="float32",
+        ProfilingVerbosity=SimpleNamespace(DETAILED="detailed"))
+    monkeypatch.setattr(builder, "trt", trt)
+    monkeypatch.setattr(builder, "exact_output_names", lambda *_: [])
+    args = SimpleNamespace(fp32_graph=[], precision="fp16", workspace_mb=64,
+                           disable_jit_convolutions=False,
+                           configure_network=lambda n, c: events.callbacks.append((n, c)),
+                           detailed_profiling=True)
+    if mode != "default":
+        args.strongly_typed = mode == "strong"
+    (tmp_path / "model.onnx").write_bytes(b"ONNX with explicit FP16 model and FP32 sampler")
+    entry = builder.build({"name": "model", "file": "model.onnx", "precision": "fp16_mixed"},
+                          tmp_path, tmp_path, args)
+    assert events.cleared == ["tf32"]
+    assert config.profiling_verbosity == "detailed"
+    assert entry["strongly_typed"] is (mode == "strong")
+    if mode == "strong":
+        assert events.network_flags == 3
+        assert not events.flags and not events.callbacks
+        assert unary.precision is None
+        assert entry["precision"] == "onnx_explicit_types"
+    else:
+        assert events.network_flags == 1
+        assert events.flags == ["fp16", "prefer"]
+        assert events.callbacks == [(network, config)]
+        assert unary.precision == "float32"
+        assert entry["precision"] == "fp16"

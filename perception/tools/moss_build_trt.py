@@ -40,26 +40,32 @@ def build(graph, directory, output, args):
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     builder.max_threads = 2
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    strongly_typed = bool(getattr(args, "strongly_typed", False))
+    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    if strongly_typed:
+        network_flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    network = builder.create_network(network_flags)
     parser = trt.OnnxParser(network, logger)
     if not parser.parse_from_file(str(source)):
         raise RuntimeError("ONNX parse failed:\n" + "\n".join(str(parser.get_error(i))
                                                             for i in range(parser.num_errors)))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, args.workspace_mb * 1024 * 1024)
-    config.builder_optimization_level = 1
+    config.builder_optimization_level = getattr(args, "builder_optimization_level", 1)
     config.avg_timing_iterations = 1
+    if getattr(args, "detailed_profiling", False):
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     if args.disable_jit_convolutions:
         sources = config.get_tactic_sources()
         config.set_tactic_sources(sources & ~(1 << int(trt.TacticSource.JIT_CONVOLUTIONS)))
     # This also protects FP32-sensitive operations in the mixed FP16 graphs.
     config.clear_flag(trt.BuilderFlag.TF32)
-    if precision == "fp16":
+    if precision == "fp16" and not strongly_typed:
         if not builder.platform_has_fast_fp16:
             raise RuntimeError("GPU does not support fast FP16")
         config.set_flag(trt.BuilderFlag.FP16)
     # Prefer accurate EXP/LOG and reductions: duration errors can change audio length.
-    if precision == "fp16":
+    if precision == "fp16" and not strongly_typed:
         config.set_flag(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
         for i in range(network.num_layers):
             layer = network.get_layer(i)
@@ -69,6 +75,9 @@ def build(graph, directory, output, args):
             if (layer.type == trt.LayerType.UNARY and layer.num_inputs
                     and layer.get_input(0).dtype in (trt.float16, trt.float32)):
                 layer.precision = trt.float32
+    configure_network = getattr(args, "configure_network", None)
+    if configure_network is not None and not strongly_typed:
+        configure_network(network, config)
     profile = builder.create_optimization_profile()
     profiles = graph.get("profiles", {})
     shape_values = graph.get("shape_values", {})
@@ -96,12 +105,17 @@ def build(graph, directory, output, args):
     engine_bytes = bytes(serialized)
     destination = output / (graph["name"] + ".plan")
     destination.write_bytes(engine_bytes)
-    return {"name": graph["name"], "file": destination.name, "bytes": len(engine_bytes), "precision": precision,
+    return {"name": graph["name"], "file": destination.name, "bytes": len(engine_bytes),
+            "precision": "onnx_explicit_types" if strongly_typed else precision,
+            "requested_precision": precision, "strongly_typed": strongly_typed,
+            "precision_policy": ("ONNX explicit tensor types; no FP16 builder flag or precision callback"
+                                 if strongly_typed else "Original weakly typed builder policy"),
             "source_precision": source_precision, "tf32_enabled": False,
             "jit_convolutions_disabled": args.disable_jit_convolutions,
             "exact_validation_outputs": exact_output_names(graph, source),
             "sha256": hashlib.sha256(engine_bytes).hexdigest(),
             "onnx_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "builder_optimization_level": config.builder_optimization_level,
             "build_seconds": time.perf_counter() - started, "profiles": profiles, "shape_values": shape_values}
 
 

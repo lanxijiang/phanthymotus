@@ -54,9 +54,29 @@ def resolve_graph_plans(assets, plan_dir: str | Path | None, engine_paths: dict 
 
 
 class TensorRTGraphPool(SharedGraphPool):
-    def __init__(self, assets, plan_dir: str | Path | None = None, *, device: int = 3, engine_paths: dict | None = None, driver_tool: str | Path | None = None, encoder_context_mode: str = "shared-serial"):
+    def __init__(self, assets, plan_dir: str | Path | None = None, *, device: int = 3, engine_paths: dict | None = None, optional_engine_paths: dict | None = None, driver_tool: str | Path | None = None, encoder_context_mode: str = "shared-serial"):
         self.encoder_context_mode = encoder_context_mode
         plan_paths, omitted = resolve_graph_plans(assets, plan_dir, engine_paths, encoder_context_mode)
+        optional_engine_paths = dict(optional_engine_paths or {})
+        if set(optional_engine_paths) - {"local_fixed_sampled_frame"}:
+            raise ValueError("Unsupported optional MOSS TensorRT graph")
+        if set(optional_engine_paths) & set(assets.graph_paths):
+            raise ValueError("Optional MOSS TensorRT graph cannot replace an asset graph")
+        for name, path in optional_engine_paths.items():
+            path = Path(path).resolve()
+            if not path.is_file():
+                raise FileNotFoundError(f"Missing optional MOSS TensorRT plan for {name}: {path}")
+            plan_paths[name] = path
+        if "local_fixed_sampled_frame" in optional_engine_paths and "local_cached_step" in plan_paths:
+            # The caller validates the fused contract before constructing the
+            # pool. Keep the original graph in ModelAssets for provenance, but
+            # do not retain duplicate local weights in each inference process.
+            # Its runner remains present and fails explicitly if reached.
+            del plan_paths["local_cached_step"]
+            omitted["local_cached_step"] = (
+                "superseded by local_fixed_sampled_frame; local step inference is disabled")
+        self.effective_plan_paths = {name: Path(path).resolve() for name, path in plan_paths.items()}
+        graph_names = tuple(assets.graph_paths) + tuple(optional_engine_paths)
         import tensorrt as trt
         tool_path = Path(driver_tool) if driver_tool else Path(__file__).resolve().parents[2] / "tools/trt_session.py"
         if not tool_path.is_file():
@@ -67,6 +87,9 @@ class TensorRTGraphPool(SharedGraphPool):
         self.runner_module = runner_module
         self.device = int(device)
         self.profile_enabled = os.environ.get("MOSS_TRT_PROFILE") == "1"
+        # Freeze the policy before lazy contexts are created. Only this MOSS
+        # pool defaults to resident state; generic builder sessions do not.
+        self.resident_state_enabled = os.environ.get("MOSS_TRT_RESIDENT_STATE", "1") == "1"
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.trt_runtime = trt.Runtime(self.logger)
         self.loader_cuda = runner_module.CudaDriver(self.device)
@@ -104,7 +127,8 @@ class TensorRTGraphPool(SharedGraphPool):
             session.context = engine.create_execution_context()
             if session.context is None:
                 raise RuntimeError(f"Cannot lazily create TensorRT context for {label}")
-            session.configure_profiling(graph_name, enabled=self.profile_enabled)
+            session.configure_profiling(graph_name, enabled=self.profile_enabled,
+                                        resident_state=self.resident_state_enabled)
             return session
 
         def shared_encoder(feeds):
@@ -127,7 +151,7 @@ class TensorRTGraphPool(SharedGraphPool):
             cuda = runner_module.CudaDriver(self.device)
             sessions = {}
             runners = {}
-            for name in assets.graph_paths:
+            for name in graph_names:
                 if name in self.omitted_graphs:
                     def missing(feeds, name=name):
                         raise FileNotFoundError(f"Original MOSS graph {name} is unavailable: {self.omitted_graphs[name]}; no substitute encoder or audio will be used")
@@ -193,7 +217,13 @@ class TensorRTGraphPool(SharedGraphPool):
         observed_at = time.perf_counter()
         with self.context_inventory_lock:
             contexts = {instance: sorted(sessions) for instance, sessions in self.instance_sessions.items()}
-        return {"gpu": gpu, "observed_at_monotonic_seconds": observed_at, "snapshot_scope": "GPU free and context inventory are adjacent observations, not an atomic per-process peak", "context_allocation": "lazy on first graph run", "encoder_context_mode": self.encoder_context_mode, "encoder_parallelism": 0 if "codec_encoder" in self.omitted_graphs else 1 if self.encoder_context_mode == "shared-serial" else "one per active instance", "materialized_instance_contexts": contexts, "shared_encoder_context_materialized": self.shared_encoder_session is not None, "loaded_shared_engines": sorted(self.engines), "omitted_graphs": dict(self.omitted_graphs)}
+            sessions = [(instance, name, session)
+                        for instance, graph_sessions in self.instance_sessions.items()
+                        for name, session in graph_sessions.items()]
+        graph_states = [dict(session.cuda_graph_snapshot(), instance_id=instance, graph=name)
+                        for instance, name, session in sessions
+                        if callable(getattr(session, "cuda_graph_snapshot", None))]
+        return {"gpu": gpu, "observed_at_monotonic_seconds": observed_at, "snapshot_scope": "GPU free and context inventory are adjacent observations, not an atomic per-process peak", "context_allocation": "lazy on first graph run", "encoder_context_mode": self.encoder_context_mode, "encoder_parallelism": 0 if "codec_encoder" in self.omitted_graphs else 1 if self.encoder_context_mode == "shared-serial" else "one per active instance", "materialized_instance_contexts": contexts, "shared_encoder_context_materialized": self.shared_encoder_session is not None, "loaded_shared_engines": sorted(self.engines), "omitted_graphs": dict(self.omitted_graphs), "cuda_graph_sessions": graph_states}
 
     def close(self):
         """After inference has stopped, release contexts, weights and streams."""
@@ -213,6 +243,7 @@ class TensorRTGraphPool(SharedGraphPool):
         self.loader_cuda.call("cuCtxSetCurrent", self.loader_cuda.context)
         trace("drop_execution_contexts")
         if self.shared_encoder_session is not None:
+            self.shared_encoder_session.close()
             self.shared_encoder_session.context = None
             self.shared_encoder_session.engine = None
             self.shared_encoder_session.runtime = None
@@ -228,6 +259,7 @@ class TensorRTGraphPool(SharedGraphPool):
             for session in sessions.values():
                 # Runners can retain the session wrapper; remove its GPU
                 # objects explicitly instead of relying on closure GC.
+                session.close()
                 session.context = None
                 session.engine = None
                 session.runtime = None
