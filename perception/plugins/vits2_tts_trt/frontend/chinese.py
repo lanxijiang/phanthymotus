@@ -14,6 +14,7 @@ from .fst_tn import FstTextNormalizer
 
 from .heteronym import custom_dict, jieba_phrases
 from .release_paths import frontend_data_dir, tn_cache_dir
+from .pronunciation_cache import predict_chinese_segment
 
 log = logging.getLogger(__name__)
 
@@ -193,82 +194,98 @@ def _g2p(segments):
     tones_list = []
     word2ph = []
     for seg in segments:
-        # Replace all English words in the sentence
-        seg = re.sub("[a-zA-Z]+", "", seg)
-        seg_cut = psg.lcut(seg)
-        initials = []
-        finals = []
-        seg_cut = tone_modifier.pre_merge_for_modify(seg_cut)
-        for word, pos in seg_cut:
-            if pos == "eng":
-                continue
-            sub_initials, sub_finals = _get_initials_finals(word)
-            sub_finals = tone_modifier.modified_tone(word, pos, sub_finals)
-            initials.append(sub_initials)
-            finals.append(sub_finals)
+        phones, tones, alignment = predict_chinese_segment(_g2p_segment, seg)
+        phones_list.extend(phones)
+        tones_list.extend(tones)
+        word2ph.extend(alignment)
+    return phones_list, tones_list, word2ph
 
-        initials = sum(initials, [])
-        finals = sum(finals, [])
-        for c, v in zip(initials, finals):
-            raw_pinyin = c + v
-            # pypinyin can emit an empty initial/final for a stripped MIX
-            # fragment (e.g. an English brand normalized inside Chinese).
-            # It carries no acoustic token; ignore it instead of indexing an
-            # empty tone string or failing the complete frontend conversion.
-            if not c and not v:
-                # Keep one alignment token for this source character.  A
-                # silent punctuation token is safer than dropping a token
-                # (which would invalidate word2ph and the training cache).
-                c, v = ".", "."
-            # Distinguish the three pypinyin representations of "i".
-            if c == v:
-                if c not in punctuation:
-                    c = "."
-                phone = [c]
-                tone = "0"
-                word2ph.append(1)
+
+def _g2p_segment(seg):
+    """Original segment conversion, independent of previous/next segments.
+
+    Cache this entire unit instead of individual words: jieba segmentation,
+    pre-merge and tone changes need the complete existing segment context.
+    """
+    phones_list = []
+    tones_list = []
+    word2ph = []
+    # Replace all English words in the sentence
+    seg = re.sub("[a-zA-Z]+", "", seg)
+    seg_cut = psg.lcut(seg)
+    initials = []
+    finals = []
+    seg_cut = tone_modifier.pre_merge_for_modify(seg_cut)
+    for word, pos in seg_cut:
+        if pos == "eng":
+            continue
+        sub_initials, sub_finals = _get_initials_finals(word)
+        sub_finals = tone_modifier.modified_tone(word, pos, sub_finals)
+        initials.append(sub_initials)
+        finals.append(sub_finals)
+
+    initials = sum(initials, [])
+    finals = sum(finals, [])
+    for c, v in zip(initials, finals):
+        raw_pinyin = c + v
+        # pypinyin can emit an empty initial/final for a stripped MIX
+        # fragment (e.g. an English brand normalized inside Chinese).
+        # It carries no acoustic token; ignore it instead of indexing an
+        # empty tone string or failing the complete frontend conversion.
+        if not c and not v:
+            # Keep one alignment token for this source character.  A
+            # silent punctuation token is safer than dropping a token
+            # (which would invalidate word2ph and the training cache).
+            c, v = ".", "."
+        # Distinguish the three pypinyin representations of "i".
+        if c == v:
+            if c not in punctuation:
+                c = "."
+            phone = [c]
+            tone = "0"
+            word2ph.append(1)
+        else:
+            v_without_tone = v[:-1]
+            tone = v[-1]
+
+            pinyin = c + v_without_tone
+            assert tone in "12345"
+
+            if c:
+                # Syllables with an initial.
+                v_rep_map = {
+                    "uei": "ui",
+                    "iou": "iu",
+                    "uen": "un",
+                }
+                if v_without_tone in v_rep_map.keys():
+                    pinyin = c + v_rep_map[v_without_tone]
             else:
-                v_without_tone = v[:-1]
-                tone = v[-1]
-
-                pinyin = c + v_without_tone
-                assert tone in "12345"
-
-                if c:
-                    # Syllables with an initial.
-                    v_rep_map = {
-                        "uei": "ui",
-                        "iou": "iu",
-                        "uen": "un",
-                    }
-                    if v_without_tone in v_rep_map.keys():
-                        pinyin = c + v_rep_map[v_without_tone]
+                # Syllables without an initial.
+                pinyin_rep_map = {
+                    "ing": "ying",
+                    "i": "yi",
+                    "in": "yin",
+                    "u": "wu",
+                }
+                if pinyin in pinyin_rep_map.keys():
+                    pinyin = pinyin_rep_map[pinyin]
                 else:
-                    # Syllables without an initial.
-                    pinyin_rep_map = {
-                        "ing": "ying",
-                        "i": "yi",
-                        "in": "yin",
-                        "u": "wu",
+                    single_rep_map = {
+                        "v": "yu",
+                        "e": "e",
+                        "i": "y",
+                        "u": "w",
                     }
-                    if pinyin in pinyin_rep_map.keys():
-                        pinyin = pinyin_rep_map[pinyin]
-                    else:
-                        single_rep_map = {
-                            "v": "yu",
-                            "e": "e",
-                            "i": "y",
-                            "u": "w",
-                        }
-                        if pinyin[0] in single_rep_map.keys():
-                            pinyin = single_rep_map[pinyin[0]] + pinyin[1:]
+                    if pinyin[0] in single_rep_map.keys():
+                        pinyin = single_rep_map[pinyin[0]] + pinyin[1:]
 
-                assert pinyin in pinyin_to_symbol_map.keys(), (pinyin, seg, raw_pinyin)
-                phone = pinyin_to_symbol_map[pinyin].split(" ")
-                word2ph.append(len(phone))
+            assert pinyin in pinyin_to_symbol_map.keys(), (pinyin, seg, raw_pinyin)
+            phone = pinyin_to_symbol_map[pinyin].split(" ")
+            word2ph.append(len(phone))
 
-            phones_list += phone
-            tones_list += [int(tone)] * len(phone)
+        phones_list += phone
+        tones_list += [int(tone)] * len(phone)
     return phones_list, tones_list, word2ph
 
 

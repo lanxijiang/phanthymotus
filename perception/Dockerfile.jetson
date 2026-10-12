@@ -21,6 +21,11 @@ COPY perception/deploy/ /deploy/
 
 ENV PYTHONUNBUFFERED=1
 ENV RCUTILS_COLORIZED_OUTPUT=0
+# Concurrent instances share Orin's CPU cores. NumPy otherwise starts six BLAS
+# threads per process for small frontend/alignment operations. One thread was
+# faster in our two-core local checks; the TTS networks still use CUDA/TRT.
+ENV OPENBLAS_NUM_THREADS=1
+ENV OMP_NUM_THREADS=1
 EXPOSE 15720 15721
 ENTRYPOINT []
 CMD ["/bin/bash", "-c", \

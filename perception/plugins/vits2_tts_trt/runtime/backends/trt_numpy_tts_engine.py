@@ -45,6 +45,70 @@ def _generate_path(duration, mask):
     return path[:, None].transpose(0, 1, 3, 2) * mask
 
 
+def _expand_priors(duration, x_mask, y_mask, m_p, logs_p):
+    """Expand batch-one priors without allocating a dense alignment matrix.
+
+    The exported encoder returns nonnegative integer durations and binary
+    masks. Each target frame therefore selects just one source column. Keep
+    the original path for other inputs, including nonfinite priors: a dense
+    product can propagate ``0 * NaN/Inf`` from an unselected source column.
+    """
+    can_repeat = (
+        duration.ndim == 3
+        and duration.shape[:2] == (1, 1)
+        and x_mask.shape == duration.shape
+        and y_mask.ndim == 3
+        and y_mask.shape[:2] == (1, 1)
+        and m_p.ndim == 3
+        and m_p.shape[0] == 1
+        and m_p.shape[2] == duration.shape[2]
+        and logs_p.shape == m_p.shape
+        and all(array.dtype == np.float32 for array in
+                (duration, x_mask, y_mask, m_p, logs_p))
+    )
+    if can_repeat:
+        counts = duration[0, 0]
+        frame_count = y_mask.shape[2]
+        can_repeat = (
+            np.all((x_mask == 0) | (x_mask == 1))
+            and np.all(y_mask == 1)
+            and np.all(np.isfinite(counts))
+            and np.all((counts >= 0) & (counts <= frame_count))
+            and np.all(counts == np.floor(counts))
+            and np.all(counts[x_mask[0, 0] == 0] == 0)
+        )
+    if can_repeat:
+        total = int(np.sum(counts, dtype=np.float64))
+        # Float32 cumulative integer sums are exact in this range. The actual
+        # TensorRT frame profile is much smaller (currently 2048 frames).
+        can_repeat = total <= 2**24 and frame_count == max(total, 1)
+        for prior in (m_p, logs_p):
+            # Some BLAS implementations flush subnormal operands to zero.
+            # Preserve their existing behavior through the dense fallback.
+            can_repeat = can_repeat and np.all(np.isfinite(prior)) and np.all(
+                (prior == 0) | (np.abs(prior) >= np.finfo(np.float32).tiny)
+            )
+    if can_repeat:
+        if total == 0:
+            shape = (1, m_p.shape[1], 1)
+            return np.zeros(shape, dtype=m_p.dtype), np.zeros(shape, dtype=logs_p.dtype)
+        repeats = counts.astype(np.int64)
+        expanded = tuple(np.repeat(prior, repeats, axis=2) for prior in (m_p, logs_p))
+        for prior in expanded:
+            # Dense summation starts at +0, including when a selected value
+            # is -0. Preserve this bit pattern for downstream latent sampling.
+            prior[prior == 0] = 0
+        return expanded
+
+    attention = _generate_path(
+        duration, x_mask[:, :, None, :] * y_mask[:, :, :, None]
+    )
+    return tuple(
+        np.matmul(attention[:, 0], prior.transpose(0, 2, 1)).transpose(0, 2, 1)
+        for prior in (m_p, logs_p)
+    )
+
+
 def _istft(spectrum, n_fft: int, hop_length: int):
     frames = np.fft.irfft(spectrum, n=n_fft, axis=1).astype(np.float32)
     frame_count = frames.shape[-1]
@@ -54,10 +118,21 @@ def _istft(spectrum, n_fft: int, hop_length: int):
     )
     audio = np.zeros((frames.shape[0], output_length), dtype=np.float32)
     envelope = np.zeros(output_length, dtype=np.float32)
-    for frame_index in range(frame_count):
-        start = frame_index * hop_length
-        audio[:, start : start + n_fft] += frames[:, :, frame_index] * window
-        envelope[start : start + n_fft] += window * window
+    if hop_length > 0:
+        # Vectorize across frames instead of entering Python once per frame.
+        # At any output sample, a larger window offset belongs to an earlier
+        # frame. Descending offsets preserve the original accumulation order
+        # (and Float32 rounding), including where windows overlap.
+        for offset in range(n_fft - 1, -1, -1):
+            samples = slice(offset, offset + hop_length * frame_count, hop_length)
+            audio[:, samples] += frames[:, offset, :] * window[offset]
+            envelope[samples] += window[offset] * window[offset]
+    else:
+        # Keep the existing behavior for unusual zero/negative hops.
+        for frame_index in range(frame_count):
+            start = frame_index * hop_length
+            audio[:, start : start + n_fft] += frames[:, :, frame_index] * window
+            envelope[start : start + n_fft] += window * window
     valid = envelope > 1e-11
     audio[:, valid] /= envelope[valid]
     trim = n_fft // 2
@@ -271,13 +346,7 @@ class TensorRTNumpyTTSEngine:
                 f"Audio requires {frame_count} frames; TensorRT profile limit is {self.max_frames}"
             )
         y_mask = _sequence_mask(y_lengths).astype(x_mask.dtype)[:, None, :]
-        attention = _generate_path(
-            duration, x_mask[:, :, None, :] * y_mask[:, :, :, None]
-        )
-        m_p = np.matmul(attention[:, 0], m_p.transpose(0, 2, 1)).transpose(0, 2, 1)
-        logs_p = np.matmul(
-            attention[:, 0], logs_p.transpose(0, 2, 1)
-        ).transpose(0, 2, 1)
+        m_p, logs_p = _expand_priors(duration, x_mask, y_mask, m_p, logs_p)
         noise = self._rng.standard_normal(m_p.shape).astype(np.float32)
         z_p = m_p + noise * np.exp(logs_p) * noise_scale
         z = self.flow.run({"z_p": z_p, "y_mask": y_mask, "g": g})["z"]

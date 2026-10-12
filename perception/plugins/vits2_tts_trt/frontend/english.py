@@ -6,6 +6,7 @@ import numpy as np
 
 from .symbols import punctuation, symbols
 from .release_paths import frontend_data_dir, nltk_data_dir
+from .pronunciation_cache import predict_english_token
 
 # Configure the verified release NLTK data path before importing g2p_en.
 NLTK_DATA_DIR = str(nltk_data_dir())
@@ -323,7 +324,7 @@ def g2p_token(token):
     if token.upper() in eng_dict:
         phns, tns = refine_syllables(eng_dict[token.upper()])
         return tuple(post_replace_ph(i) for i in phns), tuple(tns)
-    phone_list = [p for p in _g2p(token) if p != " "]
+    phone_list = [p for p in predict_english_token(_g2p, token) if p != " "]
     phns, tns = [], []
     for ph in phone_list:
         if ph in arpa:

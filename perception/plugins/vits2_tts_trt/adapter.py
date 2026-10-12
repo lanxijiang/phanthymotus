@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from .runtime.backends.trt_numpy_tts_engine import TensorRTNumpyTTSEngine
+from .frontend.pronunciation_cache import PronunciationCache, use_pronunciation_cache
 
 
 log = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ class Vits2TensorRTAdapter(TTSAdapter):
         model_config: str = "",
         engine_dir: str = "",
         max_chunk_tokens: int | None = None,
+        first_sentence: bool | None = None,
     ):
         # Both paths come from the installed release (see
         # utils.model_downloader.ensure_vits2_model), never from an env default:
@@ -96,6 +99,12 @@ class Vits2TensorRTAdapter(TTSAdapter):
                 f"adapter text limit {self.max_chunk_tokens} exceeds engine limit "
                 f"{engine_limit}"
             )
+        # Opt-in only: changing utterance boundaries can change prosody and
+        # latent sampling, so this candidate requires listening comparison.
+        self.first_sentence = bool(
+            _env_int("MIX_VITS_FIRST_SENTENCE", 0, 0, 1)
+            if first_sentence is None else first_sentence
+        )
 
     def set_speed(self, speed: float) -> None:
         speed = float(speed)
@@ -118,19 +127,26 @@ class Vits2TensorRTAdapter(TTSAdapter):
         # IDs for synthesis so a dictionary miss does not run G2P repeatedly.
         # The cache belongs to this invocation, never to a later request.
         text_ids_by_chunk = {}
+        pronunciations = PronunciationCache()
 
         def text_ids_for(chunk):
             if chunk not in text_ids_by_chunk:
-                text_ids_by_chunk[chunk] = self._engine._get_text_ids(
-                    chunk, normalized=True
-                )
+                # Overlapping candidates contain the same OOV words. Reuse
+                # only their exact predictor output; keep all contextual
+                # normalization, tokenization, tones and phone conversion.
+                # Exit the context before yielding to a caller.
+                with use_pronunciation_cache(pronunciations):
+                    text_ids_by_chunk[chunk] = self._engine._get_text_ids(
+                        chunk, normalized=True
+                    )
             return text_ids_by_chunk[chunk]
 
         def token_count(chunk):
             return len(text_ids_for(chunk)[0])
 
         for chunk in _frontend_iter_text_chunks(
-            normalize_text_mix(text), token_count, self.max_chunk_tokens
+            normalize_text_mix(text), token_count, self.max_chunk_tokens,
+            first_sentence=self.first_sentence,
         ):
             yield chunk, text_ids_for(chunk)
 
@@ -140,31 +156,44 @@ class Vits2TensorRTAdapter(TTSAdapter):
     def synthesize_stream(self, text: str):
         pause_samples = SAMPLE_RATE * CHUNK_PAUSE_MS // 1000
         silence = b"\x00\x00" * pause_samples
+        request_started = time.perf_counter()
         with self._lock:
+            lock_wait_ms = (time.perf_counter() - request_started) * 1000.0
             # One deterministic latent stream per complete request. Resetting for
             # every text chunk would repeat the same noise prefix at boundaries.
             reset_random_state = getattr(self._engine, "reset_random_state", None)
             if reset_random_state is not None:
                 reset_random_state()
+            frontend_started = time.perf_counter()
             for chunk_index, (chunk, text_ids) in enumerate(
                 self.iter_text_chunks(text)
             ):
+                frontend_ms = (time.perf_counter() - frontend_started) * 1000.0
                 token_count = len(text_ids[0])
-                log.info(
-                    "text redacted: chars=%d chunk=%d tokens=%d",
-                    len(text.strip()),
-                    chunk_index,
-                    token_count,
-                )
                 if chunk_index and silence:
                     yield silence
+                engine_started = time.perf_counter()
                 pcm = self._engine.synthesize(
                     chunk,
                     text_ids=text_ids,
                     length_scale=1.0 / self._speed,
                 )
+                log.info(
+                    "[vits2_tts_trt] chunk synthesis: chars=%d chunk=%d tokens=%d "
+                    "frontend_ms=%.1f engine_ms=%.1f pcm_bytes=%d",
+                    len(text.strip()), chunk_index, token_count, frontend_ms,
+                    (time.perf_counter() - engine_started) * 1000.0, len(pcm),
+                )
+                if chunk_index == 0:
+                    log.info(
+                        "[vits2_tts_trt] first PCM ready: lock_wait_ms=%.1f "
+                        "elapsed_ms=%.1f",
+                        lock_wait_ms, (time.perf_counter() - request_started) * 1000.0,
+                    )
                 for offset in range(0, len(pcm), CHUNK_BYTES):
                     yield pcm[offset : offset + CHUNK_BYTES]
+                # Consumer backpressure between yields is not frontend work.
+                frontend_started = time.perf_counter()
 
     def warmup(self) -> int:
         warmup_bytes = 0

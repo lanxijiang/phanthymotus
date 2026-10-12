@@ -86,7 +86,10 @@ SYNTH_QUEUE_FRAMES = _env_int("MIX_VITS_SYNTH_QUEUE_FRAMES", 200, 1, 4000)
 MAX_BURST_FRAMES = _env_int("MIX_VITS_MAX_BURST_FRAMES", 20, 1, 200)
 SUBSCRIBER_WAIT_MS = _env_int("MIX_VITS_SUBSCRIBER_WAIT_MS", 5000, 0, 60000)
 SUBSCRIBER_POLL_MS = _env_int("MIX_VITS_SUBSCRIBER_POLL_MS", 10, 1, 1000)
-SUBSCRIBER_SETTLE_MS = _env_int("MIX_VITS_SUBSCRIBER_SETTLE_MS", 500, 0, 5000)
+# Require a continuous DDS match, in parallel with first-chunk synthesis.
+# A fixed 500 ms guard dominated warm requests after the runtime optimizations.
+# Keep an override for deployments whose discovery needs a longer guard.
+SUBSCRIBER_SETTLE_MS = _env_int("MIX_VITS_SUBSCRIBER_SETTLE_MS", 100, 0, 5000)
 # Off by default: sending faster than realtime has no safe landing on a live
 # consumer. It either buffers without bound or has to discard audio, and the
 # browser player's attempt to bound its lead instead produced overlapped,

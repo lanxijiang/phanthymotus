@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import ctypes
 import ctypes.util
+import math
 from pathlib import Path
 
 import numpy as np
@@ -147,8 +148,16 @@ class _DeviceBuffer:
         self.capacity = 0
 
     def reserve(self, size: int) -> int:
+        if size < 0:
+            raise ValueError("CUDA buffer size must be non-negative")
+        # TensorRT still needs a non-null binding for empty tensors.
+        size = max(size, 1)
         if size > self.capacity:
-            self.cuda.free(self.pointer)
+            # Release first so a growing buffer never temporarily consumes both
+            # capacities on the memory-limited Orin. Reset ownership before
+            # malloc: if allocation fails, close/retry must not free the stale
+            # pointer a second time.
+            self.close()
             self.pointer = self.cuda.malloc(size)
             self.capacity = size
         return self.pointer
@@ -187,52 +196,72 @@ class TensorRTCudaSession:
         if not hasattr(self.engine, "num_io_tensors"):
             raise RuntimeError("The CUDA/NumPy backend requires TensorRT tensor API v3")
         self._buffers: dict[str, _DeviceBuffer] = {}
-
-    def _buffer(self, name: str, size: int) -> int:
-        return self._buffers.setdefault(name, _DeviceBuffer(self.cuda)).reserve(size)
-
-    def run(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        trt = self.trt
-        host_inputs = {}
-        output_specs = []
+        self._input_shapes: dict[str, tuple[int, ...]] = {}
+        inputs, outputs = [], []
         for index in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(index)
-            mode = self.engine.get_tensor_mode(name)
-            # Not trt.nptype(): TensorRT 8.5's binding maps BOOL through
-            # np.bool, which NumPy removed in 1.24 — so on jp511 (TRT 8.5.2.2 +
-            # numpy 1.24.4) the first engine run dies with AttributeError. The
-            # shared helper resolves the common dtypes itself and only falls
-            # back to nptype() for exotic ones; OCR has relied on it since it
-            # shipped.
-            dtype = trt_dtype_to_numpy(trt, self.engine.get_tensor_dtype(name))
-            if mode == trt.TensorIOMode.INPUT:
-                if name not in inputs:
-                    raise KeyError(f"Missing TensorRT input {name!r}")
-                array = np.ascontiguousarray(inputs[name], dtype=dtype)
+            # Cache static metadata once. The shared mapper also avoids TRT
+            # 8.5's nptype(BOOL), which accesses removed NumPy np.bool.
+            dtype = np.dtype(trt_dtype_to_numpy(trt, self.engine.get_tensor_dtype(name)))
+            target = inputs if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT else outputs
+            target.append((name, dtype))
+        self._input_specs = tuple(inputs)
+        self._output_specs = tuple(outputs)
+
+    def _buffer(self, name: str, size: int) -> int:
+        buffer = self._buffers.get(name)
+        if buffer is None:
+            buffer = self._buffers[name] = _DeviceBuffer(self.cuda)
+        return buffer.reserve(size)
+
+    def run(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Return independently owned host arrays after CUDA completion.
+
+        All engine outputs retain a device binding and are copied to the host.
+        Buffers grow only to observed tensor sizes, never profile maxima.
+        The session/context is sequential, as is the owning TTS engine.
+        """
+        host_inputs = {}
+        for name, dtype in self._input_specs:
+            if name not in inputs:
+                raise KeyError(f"Missing TensorRT input {name!r}")
+            array = np.ascontiguousarray(inputs[name], dtype=dtype)
+            if self._input_shapes.get(name) != array.shape:
                 if not self.context.set_input_shape(name, array.shape):
                     raise ValueError(f"Shape outside TensorRT profile: {name}={array.shape}")
-                host_inputs[name] = array
-            else:
-                output_specs.append((name, dtype))
+                self._input_shapes[name] = array.shape
+            host_inputs[name] = array
 
         outputs = {}
         for name, array in host_inputs.items():
             pointer = self._buffer(name, array.nbytes)
-            self.cuda.copy_to_device(pointer, array)
-            self.context.set_tensor_address(name, pointer)
-        for name, dtype in output_specs:
+            if not self.context.set_tensor_address(name, pointer):
+                raise RuntimeError(f"Failed to bind TensorRT tensor {name!r}")
+        for name, dtype in self._output_specs:
             shape = tuple(self.context.get_tensor_shape(name))
             if any(dimension < 0 for dimension in shape):
                 raise RuntimeError(f"Unresolved TensorRT output shape: {name}={shape}")
-            array = np.empty(shape, dtype=dtype)
-            pointer = self._buffer(name, array.nbytes)
-            self.context.set_tensor_address(name, pointer)
-            outputs[name] = array
+            size = math.prod(shape) * dtype.itemsize
+            pointer = self._buffer(name, size)
+            if not self.context.set_tensor_address(name, pointer):
+                raise RuntimeError(f"Failed to bind TensorRT tensor {name!r}")
+            outputs[name] = np.empty(shape, dtype=dtype)
 
-        if not self.context.execute_async_v3(self.cuda.stream):
-            raise RuntimeError(f"TensorRT execution failed: {self.path.name}")
-        for name, array in outputs.items():
-            self.cuda.copy_to_host(array, self._buffers[name].pointer)
+        # Resolve/bind every tensor before scheduling copies. Keep the host
+        # arrays alive until the stream is drained even on an execution error.
+        try:
+            for name, array in host_inputs.items():
+                self.cuda.copy_to_device(self._buffers[name].pointer, array)
+            if not self.context.execute_async_v3(self.cuda.stream):
+                raise RuntimeError(f"TensorRT execution failed: {self.path.name}")
+            for name, array in outputs.items():
+                self.cuda.copy_to_host(array, self._buffers[name].pointer)
+        except BaseException:
+            try:
+                self.cuda.synchronize()
+            except Exception:
+                pass  # Keep the original failure for diagnosis.
+            raise
         self.cuda.synchronize()
         return outputs
 

@@ -24,6 +24,33 @@ MODEL_DIR = Path(os.getenv("VITS2_MODEL_DIR", "/models/vits2"))
 
 from plugins.vits2_tts_trt.adapter import Vits2TensorRTAdapter, WARMUP_CASES
 from plugins.vits2_tts_trt.frontend.chunking import iter_text_chunks
+from plugins.vits2_tts_trt.frontend.pronunciation_cache import predict_english_token
+
+
+class TestLazyChunks(unittest.TestCase):
+    def test_first_chunk_does_not_convert_the_tail_of_the_request(self):
+        converted = []
+
+        def count(text):
+            converted.append(text)
+            return len(text)
+
+        text = "第一句。第二句！第三句？第四句。第五句。"
+        chunks = iter_text_chunks(text, count, 8)
+        self.assertEqual(next(chunks), "第一句。第二句！")
+        self.assertFalse(any("第四句" in value or "第五句" in value for value in converted))
+        self.assertEqual(list(chunks), ["第三句？第四句。", "第五句。"])
+
+    def test_preserves_existing_greedy_boundaries(self):
+        # Captured from the submitted fc0c2df chunker, with character counts
+        # standing in for an engine's token counts. Real IDs/PCM are device tests.
+        for text, limit, expected in (
+            ("Hello. Go! Hola.", 12, ["Hello. Go!", " Hola."]),
+            ("你好。 Hello. 好的。", 12, ["你好。 Hello.", " 好的。"]),
+            ("hi! bye? later.", 7, ["hi!", " bye?", " later."]),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(list(iter_text_chunks(text, len, limit)), expected)
 
 
 class _FakeEngine:
@@ -88,6 +115,30 @@ class TestRequestLocalIds(unittest.TestCase):
         )
         with patch("plugins.vits2_tts_trt.adapter.CHUNK_PAUSE_MS", 0):
             self.assertEqual(b"".join(self.adapter.synthesize_stream(text)), expected)
+
+    def test_pronunciation_cache_is_scoped_to_frontend_calls_not_yields(self):
+        calls = []
+
+        def predictor(token):
+            calls.append(token)
+            return ["AH0"]
+
+        original = self.engine._get_text_ids
+
+        def convert(text, *, normalized=False):
+            predict_english_token(predictor, "repeated")
+            return original(text, normalized=normalized)
+
+        with patch.object(self.engine, "_get_text_ids", side_effect=convert):
+            stream = self.adapter.iter_text_chunks("Hello. Go! Hola.")
+            next(stream)
+            self.assertEqual(calls, ["repeated"])
+            # A caller paused at the adapter yield must not inherit its cache.
+            predict_english_token(predictor, "repeated")
+            list(stream)
+            self.assertEqual(calls, ["repeated", "repeated"])
+            list(self.adapter.iter_text_chunks("Hello."))
+            self.assertEqual(calls, ["repeated"] * 3)
 
 
 class TestRealMixedFrontend(unittest.TestCase):

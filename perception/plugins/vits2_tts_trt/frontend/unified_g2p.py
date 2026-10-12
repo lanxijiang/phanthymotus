@@ -28,6 +28,7 @@ import re
 
 from .symbols import punctuation
 from .english import eng_dict, refine_ph, post_replace_ph, arpa, _g2p as _g2p_en
+from .pronunciation_cache import predict_english_token
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def _en_token_to_phones(word: str):
         # Pure English and mixed text use the same immutable G2P weights. This
         # avoids constructing a second predictor at the first mixed OOV word;
         # the mixed frontend's own phone/tone conversion remains unchanged.
-        for ph in filter(lambda p: p != " ", _g2p_en(word)):
+        for ph in filter(lambda p: p != " ", predict_english_token(_g2p_en, word)):
             if ph in arpa:
                 ph, tone = refine_ph(ph)
                 phones.append(post_replace_ph(ph))

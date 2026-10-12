@@ -24,6 +24,61 @@ _PUNCTUATION_UNIT_RE = re.compile(
     rf"[{re.escape(_CLOSING_PUNCTUATION)}]*|.+$",
     flags=re.DOTALL,
 )
+# Sentence-first is an experimental latency/quality tradeoff.  These are
+# deliberately conservative: an uncertain English period keeps the original
+# packing instead of turning an abbreviation into a new utterance.
+_SENTENCE_END_RE = re.compile(r"[.!?。！？]+")
+_PERIOD_WORD_RE = re.compile(r"[A-Za-z]+(?:\.[A-Za-z]+)*$")
+_PERIOD_ABBREVIATIONS = frozenset((
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "rev", "hon",
+    "capt", "col", "gen", "lt", "sgt", "maj", "esq", "co", "corp",
+    "inc", "ltd", "dept", "fig", "eq", "no", "vs", "etc", "approx",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+))
+
+
+def first_sentence_end(text: str) -> int | None:
+    """Find a conservative complete-sentence boundary in normalized text.
+
+    Chinese normalization also emits ASCII periods. Keep closing punctuation
+    with its sentence and ignore commas, decimal points, domains, initials,
+    common abbreviations and ambiguous ellipses. This does not normalize or
+    modify any input characters.
+    """
+    for match in _SENTENCE_END_RE.finditer(text):
+        start, end = match.span()
+        punctuation = match.group()
+        if start == 0:
+            continue
+        if punctuation == ".":
+            before = text[start - 1]
+            after = text[end : end + 1]
+            # A period inside an ASCII token is not a sentence boundary.
+            if after and before.isascii() and before.isalnum() and after.isascii() and after.isalnum():
+                continue
+            word = _PERIOD_WORD_RE.search(text[:start])
+            if word is not None:
+                token = word.group()
+                if len(token) == 1 or "." in token or token.lower() in _PERIOD_ABBREVIATIONS:
+                    continue
+        elif set(punctuation) == {"."}:
+            continue
+        while end < len(text) and text[end] in _CLOSING_PUNCTUATION:
+            end += 1
+        if punctuation == ".":
+            following = text[end:].lstrip()
+            if following:
+                first = following[0]
+                # Lowercase English after a period can still be an unknown
+                # abbreviation. Delay this optimization rather than guess.
+                if first.isascii() and (first.islower() or first.isdigit()):
+                    continue
+                # URL paths and email-like forms can follow a domain dot.
+                if first in "/\\@_-":
+                    continue
+        return end
+    return None
 
 
 def _language_kind(char: str) -> str | None:
@@ -76,6 +131,8 @@ def iter_text_chunks(
     text: str,
     token_count,
     max_tokens: int,
+    *,
+    first_sentence: bool = False,
 ) -> "generator[str, None, None]":
     """Yield text chunks that each fit within ``max_tokens``.
 
@@ -87,6 +144,19 @@ def iter_text_chunks(
     """
     if max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
+
+    if first_sentence:
+        sentence_end = first_sentence_end(text)
+        if sentence_end is not None and text[sentence_end:].strip():
+            prefix = text[:sentence_end]
+            if prefix.strip() and token_count(prefix) <= max_tokens:
+                # Yield without the normal greedy lookahead into later
+                # sentences. Keep the complete remainder on the original
+                # packing path. Overlong first sentences also fall back to
+                # that path, including its existing safe token-limit splits.
+                yield prefix
+                yield from iter_text_chunks(text[sentence_end:], token_count, max_tokens)
+                return
 
     def _iter_unit_chunks(unit):
         if token_count(unit) <= max_tokens:
@@ -122,11 +192,16 @@ def iter_text_chunks(
         yield from _iter_unit_chunks(left)
         yield from _iter_unit_chunks(right)
 
-    # 1) Every natural punctuation unit fits on its own first.
-    units = [_u for _u in split_punctuation_units(text) if _u.strip()]
-    chunks = []
-    for unit in units:
-        chunks.extend(_iter_unit_chunks(unit))
+    # 1) Validate/split units on demand. Materializing all their chunks here
+    # would run G2P over the entire request before the first chunk can reach
+    # the engine. Keep the same unit order and greedy packing, with only the
+    # lookahead needed to decide whether the next chunk still fits.
+    chunks = (
+        chunk
+        for unit in split_punctuation_units(text)
+        if unit.strip()
+        for chunk in _iter_unit_chunks(unit)
+    )
 
     # 2) Greedy-join already-valid units; never re-split a merged unit.
     pending = ""
