@@ -33,17 +33,17 @@ done
 case "${JP_VERSION}" in
     5|511|5.11|5.1.1)
         JP_TAG="511"; JP_LABEL="5.1.1"
-        VITS2_MODEL_URL="${VITS2_MODEL_URL:-http://172.28.4.81:34567/liaoqianqian/models/lc1-jetson/lc1_male_v5_technical_120k_jp5_nocudnn_nojit_runtime.tar.gz}"
-        VITS2_MODEL_SHA256="${VITS2_MODEL_SHA256:-5c4b32cdefd6c72ad19d3af4014ed67f0be24485d0dbc199990cadbae4a097c0}"
+        VITS2_MODEL_URL="${VITS2_MODEL_URL:-http://172.28.4.81:34567/liaoqianqian/models/lc1-jetson/lc1_male_v6_frontend_146k_jp5_nocudnn_nojit_runtime.tar.gz}"
+        VITS2_MODEL_SHA256="${VITS2_MODEL_SHA256:-4a006ceb74325d11c506f2e054faffbfce6e0ca80946ffaaa8ef5e03fc26f96a}"
         ;;
     6|61|6.1)
         JP_TAG="61"; JP_LABEL="6.1"
-        VITS2_MODEL_URL="${VITS2_MODEL_URL:-http://172.28.4.81:34567/liaoqianqian/models/lc1-jetson/lc1_male_v5_technical_120k_jp6_runtime.tar.gz}"
-        VITS2_MODEL_SHA256="${VITS2_MODEL_SHA256:-7d54d61e1922e84ad44246078193780db43bfa826fae6cf95960c079879b353a}"
+        VITS2_MODEL_URL="${VITS2_MODEL_URL:-http://172.28.4.81:34567/liaoqianqian/models/lc1-jetson/lc1_male_v6_frontend_146k_jp6_runtime.tar.gz}"
+        VITS2_MODEL_SHA256="${VITS2_MODEL_SHA256:-e3a26c913285ba26d30624be50751fa27c8d6ecb8458ac1ad3b0f0d196794b42}"
         ;;
     *) echo "Unknown JP_VERSION=${JP_VERSION} (supported: 5, 5.11, 6, 6.1)" >&2; exit 1 ;;
 esac
-VITS_MODEL_RELEASE="${VITS_MODEL_RELEASE:-lc1_male_v5_technical_120k}"
+VITS_MODEL_RELEASE="${VITS_MODEL_RELEASE:-lc1_male_v6_frontend_146k}"
 
 RESOURCE_CENTER_URL="${RESOURCE_CENTER_URL:-https://motus.phanthy.com}"
 

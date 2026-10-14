@@ -486,6 +486,19 @@ class TTSPlugin:
             return {"state": "idle"}
 
         if action == "speak":
+            # An explicitly selected instance owns its output topic. Never
+            # route its request to another running instance or restart it.
+            node = None
+            if instance_id:
+                node = self._nodes.get(instance_id)
+                if node is None:
+                    raise ValueError(
+                        f"Unknown TTS instance {instance_id!r}; call start first"
+                    )
+                if node.state != "running":
+                    raise RuntimeError(
+                        f"TTS instance {instance_id!r} is not running; call start first"
+                    )
             try:
                 self._ensure_adapter()
             except RuntimeError:
@@ -493,7 +506,10 @@ class TTSPlugin:
             text = args.get("text", "").strip()
             if not text:
                 raise ValueError("text is required")
-            node = next((n for n in self._nodes.values() if n.state == "running"), None)
+            if node is None:
+                node = next(
+                    (n for n in self._nodes.values() if n.state == "running"), None
+                )
             if node is None:
                 key = instance_id or "_default"
                 node = self._nodes.get(key) or self._create_node(

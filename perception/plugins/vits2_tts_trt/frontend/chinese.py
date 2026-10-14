@@ -14,6 +14,7 @@ from .fst_tn import FstTextNormalizer
 from .release_paths import frontend_data_dir, tn_cache_dir
 from .technical_text import normalize_technical_lexemes
 from .lexicon_rules import apply_lexeme_rules
+from .special_text import normalize_special_text, verbalize_chinese_number
 
 
 def _load_phrase_pinyin_data():
@@ -237,9 +238,31 @@ def _remove_redundant_newlines_after_punctuation(text):
     return re.sub(r"([。！？!?；;：:，,.])[\t ]*(?:\r\n|\r|\n)+[\t ]*", r"\1", text)
 
 
+def _special_number(value, language):
+    """Speak a number inside a protected formula/unit, bypassing lexeme rules."""
+    if language == "ZH":
+        return verbalize_chinese_number(value)
+    from .english import normalize_numbers
+    sign = ""
+    if value.startswith(("+", "-")):
+        sign, value = ("plus " if value[0] == "+" else "minus "), value[1:]
+    if "." in value:
+        whole, fraction = value.split(".", 1)
+        digits = "zero one two three four five six seven eight nine".split()
+        return sign + normalize_numbers(whole or "0") + " point " + " ".join(digits[int(c)] for c in fraction)
+    return sign + normalize_numbers(value)
+
+
+def _normalize_raw_text(text):
+    return normalize_special_text(
+        text, lambda ordinary: _normalizer.normalize(apply_lexeme_rules(ordinary)),
+        _special_number,
+    )
+
+
 def text_normalize(text):
     text = _remove_redundant_newlines_after_punctuation(text)
-    text = _normalizer.normalize(apply_lexeme_rules(text))
+    text = _normalize_raw_text(text)
     text = normalize_technical_lexemes(_post_replace(text))
     text = replace_punctuation(text)
     return text
@@ -253,7 +276,7 @@ def mix_normalize(text: str) -> str:
     """
     from .english import replace_punctuation as en_replace_punct
     text = _remove_redundant_newlines_after_punctuation(text)
-    text = _normalizer.normalize(apply_lexeme_rules(text))
+    text = _normalize_raw_text(text)
     text = normalize_technical_lexemes(_post_replace(text))
     text = en_replace_punct(text)
     return text
