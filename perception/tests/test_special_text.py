@@ -22,6 +22,29 @@ class SpecialTextTests(unittest.TestCase):
                      "在OpenMLDB里打开FeatInsight的SQL Playground。"):
             self.assertEqual(self.normalize(text), apply_lexeme_rules(text))
 
+    def test_english_lexeme_mode_does_not_insert_chinese_aliases(self):
+        text = "Check the NVIDIA driver and SQL query with Qwen and Qwen3 on A100."
+        spoken = apply_lexeme_rules(text, language="EN")
+        self.assertEqual(spoken, text)
+        self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in spoken))
+        # The default still preserves the author's Chinese/mixed pronunciation.
+        self.assertEqual(apply_lexeme_rules("使用Qwen3和A100"), "使用千问三和A一百")
+        self.assertEqual(apply_lexeme_rules("使用NVIDIA"), "使用NVIDIA")
+
+    def test_english_mode_preserves_existing_non_chinese_lexeme_rules(self):
+        self.assertEqual(apply_lexeme_rules("Tier 1 IDC AutoML PhanRouter", language="EN"),
+                         "Tier one I D C Auto M L Phan Router")
+
+    def test_english_mode_still_protects_special_addresses(self):
+        normalized = normalize_special_text(
+            "Use Qwen at https://nvidia.com and email qwen3@example.com.",
+            lambda text: apply_lexeme_rules(text, language="EN"), number,
+        )
+        self.assertIn("Use Qwen", normalized)
+        self.assertIn("N V I D I A dot C O M", normalized)
+        self.assertIn("Q W E N three at E X A M P L E dot C O M", normalized)
+        self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in normalized))
+
     def test_mail_local_part_is_not_a_model_name(self):
         text = self.normalize("请联系qwen3+tts_2@4paradigm.com。")
         self.assertIn("Q W E N 三 加号 T T S 下划线 二 艾特 四 P A R A D I G M 点 C O M", text)

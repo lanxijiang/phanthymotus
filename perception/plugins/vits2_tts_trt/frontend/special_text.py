@@ -1,4 +1,4 @@
-"""Read explicit addresses, formulas and measurements before lexical TN.
+"""Read explicit addresses, formulas and quantities before lexical TN.
 
 The delivered lexicon is still used for every ordinary text span. Special spans
 are spoken separately so a product-name rule cannot change an address, decimal
@@ -12,6 +12,13 @@ _EMAIL = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0
 _URL = r"(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"
 _ADDRESSES = re.compile(r"(?<![A-Za-z0-9_])(?:" + _URL + "|" + _EMAIL + ")", re.I)
 _CJK = re.compile(r"[\u4e00-\u9fff]")
+# An explicit count classifier disambiguates a cardinal from the released
+# FST's telephone-like reading (111台 -> 幺幺幺台). Keep the set small and do
+# not pick up numeric suffixes in identifiers, decimals or formatted numbers.
+_ZH_COUNT = re.compile(
+    r"(?<![A-Za-z0-9_.,:/#%+\-])(?P<number>[0-9]+)[ \t]*"
+    r"(?P<classifier>台|个|件|人|份|套)"
+)
 _DIGITS = {"ZH": tuple("零一二三四五六七八九"),
            "EN": "zero one two three four five six seven eight nine".split()}
 _SYMBOLS = {
@@ -90,6 +97,19 @@ def _read_address(address, language):
     )
 
 
+def _find_non_address_spans(text, language, verbalize_number):
+    """Keep math/measurement precedence, then protect explicit Chinese counts."""
+    spans = find_math_unit_spans(text, language, verbalize_number)
+    if language == "ZH":
+        for match in _ZH_COUNT.finditer(text):
+            if any(match.start() < end and match.end() > start
+                   for start, end, _ in spans):
+                continue
+            spoken = verbalize_chinese_number(match["number"]) + match["classifier"]
+            spans.append((match.start(), match.end(), spoken))
+    return sorted(spans)
+
+
 def normalize_special_text(text, normalize_plain, verbalize_number):
     """Normalize only recognized special spans; delegate all other text.
 
@@ -108,12 +128,12 @@ def normalize_special_text(text, normalize_plain, verbalize_number):
             address = address[:-1]
         if not address:
             continue
-        for start, end, spoken in find_math_unit_spans(text[cursor:match.start()], language, verbalize_number):
+        for start, end, spoken in _find_non_address_spans(text[cursor:match.start()], language, verbalize_number):
             spans.append((cursor + start, cursor + end, spoken))
         end = match.start() + len(address)
         spans.append((match.start(), end, _read_address(address, language)))
         cursor = end
-    for start, end, spoken in find_math_unit_spans(text[cursor:], language, verbalize_number):
+    for start, end, spoken in _find_non_address_spans(text[cursor:], language, verbalize_number):
         spans.append((cursor + start, cursor + end, spoken))
     if not spans:
         return normalize_plain(text)

@@ -1,6 +1,8 @@
 import pickle
+import json
 import os
 import re
+from functools import lru_cache
 import inflect
 import numpy as np
 
@@ -314,15 +316,127 @@ CUSTOM_EN_PRONUNCIATIONS = {
 }
 
 
+@lru_cache(maxsize=1)
+def gold_en_pronunciations():
+    """Load the English ARPAbet overlay shared by English and MIX G2P.
+
+    Imported from fanyi's PhoneTone frontend without changing pronunciations.
+    Explicit local corrections retain priority over this supplemental lexicon.
+    """
+    path = os.path.join(current_file_path, "en_gold_pronunciations.json")
+    with open(path, encoding="utf-8") as source:
+        entries = json.load(source)
+    if not isinstance(entries, dict):
+        raise ValueError("English gold lexicon must be a word-to-ARPAbet mapping")
+    result = {}
+    for word, phones in entries.items():
+        if (not isinstance(word, str) or not word or word != word.upper()
+                or not isinstance(phones, list) or not phones
+                or any(not isinstance(phone, str) or phone not in arpa for phone in phones)):
+            raise ValueError(f"Invalid English gold pronunciation: {word!r}")
+        result[word] = tuple(phones)
+    return result
+
+
+def english_pronunciation(token):
+    """Return syllables using local overrides, then gold, then CMU."""
+    word = token.upper()
+    if word in CUSTOM_EN_PRONUNCIATIONS:
+        return CUSTOM_EN_PRONUNCIATIONS[word]
+    phones = gold_en_pronunciations().get(word)
+    if phones is not None:
+        return (phones,)
+    return eng_dict.get(word)
+
+
+_EN_LEXICON_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]*(?:['.-][A-Za-z0-9_]+)*(?![A-Za-z0-9_])"
+)
+_EN_TN_CONTEXT_WORDS = frozenset({"USD", "EUR", "GBP", "CNY", "RMB", "DR", "MR", "MRS", "MS", "ST"})
+_EN_MODEL_VERSION_RE = re.compile(r"([A-Za-z]+)([-_]?)([0-9]+(?:\.[0-9]+)*)([A-Za-z]?)")
+# Released accelerator families. Do not interpret every letter/number pair as
+# a model: dates, quantities and unknown identifiers still belong to TN.
+_EN_LETTER_MODEL_PREFIXES = frozenset({"A", "B", "H", "L", "T", "V", "GB", "MI", "MLU", "SN", "WSE"})
+
+
+def _english_lexicon_spelling(token, gold):
+    """Return a protected word/model reading, or None for ordinary TN text."""
+    word = token.upper()
+    if (len(word) >= 3 and word not in _EN_TN_CONTEXT_WORDS
+            and (word in CUSTOM_EN_PRONUNCIATIONS or word in gold)):
+        return token
+
+    model = _EN_MODEL_VERSION_RE.fullmatch(token)
+    if model is None:
+        return None
+    prefix, separator, version, suffix = model.groups()
+    prefix_upper = prefix.upper()
+    if (len(prefix) >= 3 and prefix_upper not in _EN_TN_CONTEXT_WORDS
+            and (prefix_upper in CUSTOM_EN_PRONUNCIATIONS or prefix_upper in gold)):
+        spoken_prefix = prefix
+    elif (prefix_upper in _EN_LETTER_MODEL_PREFIXES
+          and version.isdigit() and len(version) <= 3):
+        spoken_prefix = " ".join(prefix_upper)
+    else:
+        return None
+
+    # Version decimals and leading zeros identify an exact model. Keep their
+    # digits (2.05 -> two point zero five), rather than rounding or dropping 0.
+    digits = "zero one two three four five six seven eight nine".split()
+    parts = version.split(".")
+    whole = parts[0]
+    spoken_number = (" ".join(digits[int(char)] for char in whole)
+                     if len(whole) > 1 and whole.startswith("0")
+                     else normalize_numbers(whole))
+    for fraction in parts[1:]:
+        spoken_number += " point " + " ".join(digits[int(char)] for char in fraction)
+    pieces = [spoken_prefix]
+    if separator == "_":
+        pieces.append("underscore")
+    pieces.append(spoken_number)
+    if suffix:
+        pieces.append(suffix.upper())
+    return " ".join(pieces)
+
+
+def normalize_preserving_english_pronunciations(text, normalize_plain):
+    """Keep known English words intact across the Chinese FST in EN mode.
+
+    Gold/CUSTOM hotwords are case insensitive, including lowercase brands.
+    Known brand versions and released accelerator families also keep English
+    digits, instead of exposing a model suffix to the Chinese FST.
+    Everything between protected tokens still uses the existing normalizer.
+    Short unit/letter tokens and TN context words remain with their surrounding
+    numbers or abbreviations. Unknown identifiers are never partial matches.
+    """
+    gold = gold_en_pronunciations()
+    protected = []
+    for match in _EN_LEXICON_WORD_RE.finditer(text):
+        token = match.group()
+        spelling = _english_lexicon_spelling(token, gold)
+        if spelling is not None:
+            protected.append((match, spelling))
+    if not protected:
+        return normalize_plain(text)
+    output = []
+    cursor = 0
+    for match, spelling in protected:
+        if cursor < match.start():
+            output.append(normalize_plain(text[cursor:match.start()]))
+        output.append(spelling)
+        cursor = match.end()
+    if cursor < len(text):
+        output.append(normalize_plain(text[cursor:]))
+    return " ".join(part.strip() for part in output if part.strip())
+
+
 def g2p_token(token):
     if token in punctuation:
         return (token,), (0,)
     # Uppercase A is a spelled letter (for example, OA), not the article "a".
     if token == "A":
         return ("ey",), (2,)
-    syllables = CUSTOM_EN_PRONUNCIATIONS.get(
-        token.upper(), eng_dict.get(token.upper())
-    )
+    syllables = english_pronunciation(token)
     if syllables is not None:
         phns, tns = refine_syllables(syllables)
         return tuple(post_replace_ph(i) for i in phns), tuple(tns)

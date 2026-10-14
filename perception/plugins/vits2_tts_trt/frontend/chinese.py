@@ -254,8 +254,19 @@ def _special_number(value, language):
 
 
 def _normalize_raw_text(text):
+    language = "MIX" if re.search(r"[\u4e00-\u9fff]", text) else "EN"
+
+    def normalize_ordinary(ordinary):
+        ordinary = apply_lexeme_rules(ordinary, language=language)
+        if language == "EN":
+            # The Chinese FST otherwise rewrites NVIDIA to its Chinese alias
+            # and splits SQL before the supplemental English G2P sees them.
+            from .english import normalize_preserving_english_pronunciations
+            return normalize_preserving_english_pronunciations(ordinary, _normalizer.normalize)
+        return _normalizer.normalize(ordinary)
+
     return normalize_special_text(
-        text, lambda ordinary: _normalizer.normalize(apply_lexeme_rules(ordinary)),
+        text, normalize_ordinary,
         _special_number,
     )
 

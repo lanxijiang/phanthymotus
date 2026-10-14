@@ -39,6 +39,11 @@ def _edge(pattern: str) -> re.Pattern:
     return re.compile(rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])", re.IGNORECASE)
 
 
+def _identifier_edge(pattern: str) -> re.Pattern:
+    """Keep a product token inside a longer ASCII identifier untouched."""
+    return re.compile(rf"(?<![A-Za-z0-9_]){pattern}(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
 # 0) Phrase-level rules. These must run before the per-token rules below,
 #    otherwise "Sage AIOS" is already split into letters and never matches.
 _PHRASE_RULES = [
@@ -79,6 +84,8 @@ _MIXED_READINGS = [
 
 # 5) Camel-case / fused product names that must become two words.
 _FUSED_NAMES = [
+    (_identifier_edge(r"openmldb"), "Open M L D B"),
+    (_identifier_edge(r"featinsight"), "Feat Insight"),
     (_edge(r"modelhub"), "Model Hub"),
     (_edge(r"phanthymotus"), "Phanthy Motus"),
     (_edge(r"phanthymovie"), "Phanthy Movie"),
@@ -97,6 +104,16 @@ _FUSED_NAMES = [
 #    other three-digit numbers are read digit by digit (九一零/三七零).
 _CN_NAMES = [
     (_edge(r"qwen"), "千问"),
+]
+
+# Bare numbers belong to number TN. Only an explicit accelerator family makes
+# 310/910 a model here; preserve the author's digit-by-digit model readings.
+_CONTEXT_MODEL_DIGITS = [
+    (re.compile(
+        rf"(?<![A-Za-z0-9_])((?:Ascend|昇腾|升腾)\s*){number}"
+        r"(?![A-Za-z0-9_]|[.,][0-9])", re.IGNORECASE,
+    ), rf"\1{spoken}")
+    for number, spoken in (("310", "三一零"), ("910", "九一零"))
 ]
 
 _MODEL_DIGITS = [
@@ -143,10 +160,7 @@ _MODEL_DIGITS = [
     (_edge(r"v5e"), "v五e"),
     (_edge(r"v5p"), "v五p"),
     (_edge(r"v6e"), "v六e"),
-    (_edge(r"310"), "三一零"),
-    (_edge(r"910"), "九一零"),
     (_edge(r"C3"), "C三"),
-    (_edge(r"01"), "零一"),
     (_edge(r"T5"), "T五"),
     (_edge(r"F1"), "F一"),
     (_edge(r"L4"), "L四"),
@@ -154,8 +168,6 @@ _MODEL_DIGITS = [
     (_edge(r"v4"), "v四"),
     (_edge(r"v7"), "v七"),
     (_edge(r"D1"), "D一"),
-    (_edge(r"2"), "二"),
-    (_edge(r"3"), "三"),
 ]
 
 # Order matters: phrase rules first, then longer alternatives before shorter ones
@@ -164,6 +176,7 @@ _MODEL_DIGITS = [
 RULES = (
     _PHRASE_RULES
     + _CN_NAMES
+    + _CONTEXT_MODEL_DIGITS
     + _MODEL_DIGITS
     + _NUMBER_RULES
     + _PROTECTED_TOKENS
@@ -206,6 +219,10 @@ for _term, _spoken in GENERATED_REPLACEMENTS.items():
     _key = _generated_key(_term)
     if len(_term.strip()) < 2 or _term.casefold() == _spoken.casefold():
         continue
+    # A numeric company name such as "111" is ambiguous without its business
+    # context. Keep it in the source dictionary, but let TN read quantities.
+    if _term.strip().isdigit():
+        continue
     if _key in _CURATED_KEYS:
         continue
     _pattern = re.compile(
@@ -223,6 +240,7 @@ _QWEN_VERSION_RE = re.compile(
     r"(?<![A-Za-z0-9])qwen(\d+(?:\.\d+)?)(?![A-Za-z0-9])", re.IGNORECASE
 )
 _CN_DIGITS = "零一二三四五六七八九"
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
 def _qwen_version(match) -> str:
@@ -234,22 +252,33 @@ def _qwen_version(match) -> str:
     return "千问" + spoken
 
 
-def apply_lexeme_rules(text: str) -> str:
-    """Rewrite known English lexemes into their intended spoken form."""
+def apply_lexeme_rules(text: str, language: str = "MIX") -> str:
+    """Rewrite lexemes; EN mode leaves Chinese aliases and digits to English TN.
+
+    MIX remains the default, preserving the author's Chinese/mixed readings.
+    The caller selects the language from the complete original input so a
+    fragment next to a protected address retains its surrounding language.
+    """
     if not text:
         return text
+    english_only = language == "EN"
 
     # Protect generated frontend_res matches from the older broad rules.
     protected = []
     for pattern, replacement in _GENERATED_RULES:
+        if english_only and _CJK_RE.search(replacement):
+            continue
         def _protect(match):
             marker = f"\\x00LEX{len(protected)}\\x00"
             protected.append((marker, replacement))
             return marker
         text = pattern.sub(_protect, text)
 
-    text = _QWEN_VERSION_RE.sub(_qwen_version, text)
+    if not english_only:
+        text = _QWEN_VERSION_RE.sub(_qwen_version, text)
     for pattern, replacement in RULES:
+        if english_only and _CJK_RE.search(replacement):
+            continue
         text = pattern.sub(replacement, text)
     for marker, replacement in protected:
         text = text.replace(marker, replacement)
