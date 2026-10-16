@@ -3,7 +3,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "plugins/vits2_tts_trt/frontend/math_units.py"
@@ -15,6 +15,12 @@ SPEC.loader.exec_module(MODULE)
 class MathUnitsTest(unittest.TestCase):
     def setUp(self):
         self.numbers = Mock(side_effect=lambda value, language: f"NUM({value})")
+        # These tests isolate span boundaries/operator composition. Actual
+        # English cardinal rendering is checked separately below, without FST.
+        reader = patch.object(MODULE, "_english_quantity",
+                              side_effect=lambda value: self.numbers(value, "EN"))
+        reader.start()
+        self.addCleanup(reader.stop)
 
     def spans(self, text, language="ZH"):
         return MODULE.find_spans(text, language, self.numbers)
@@ -83,6 +89,36 @@ class MathUnitsTest(unittest.TestCase):
 
     def test_excessively_long_expression_stays_with_existing_frontend(self):
         self.assertEqual(self.spans("+".join(["2"] * 1000)), [])
+
+
+@unittest.skipUnless(importlib.util.find_spec("inflect"), "Real cardinal checks require the released inflect dependency")
+class EnglishCardinalTest(unittest.TestCase):
+    def spoken(self, text):
+        def no_year_reader(value, language):
+            self.fail("Explicit English quantity reached the general/year-like reader")
+        return MODULE.find_spans(text, "EN", no_year_reader)[0][2]
+
+    def test_grouped_measurements_use_cardinals_not_years(self):
+        for text, expected in (
+            ("1,024.5GB", "one thousand twenty-four point five gigabytes"),
+            ("1,200.5GB", "one thousand two hundred point five gigabytes"),
+            ("2026GB", "two thousand twenty-six gigabytes"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.spoken(text), expected)
+
+    def test_signs_fractional_zeros_and_unit_plurality(self):
+        for text, expected in (
+            ("0.05GB", "zero point zero five gigabytes"),
+            ("3.00kg", "three point zero zero kilograms"),
+            ("-0.05℃", "minus zero point zero five degrees Celsius"),
+            ("1kg", "one kilogram"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.spoken(text), expected)
+
+    def test_math_uses_actual_english_number_readings(self):
+        self.assertEqual(self.spoken("y=2x-3"), "y equals two times x minus three")
 
 
 if __name__ == "__main__":

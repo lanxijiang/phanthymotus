@@ -1,0 +1,70 @@
+# Optional language-policy deployment. Original config.yaml remains unchanged.
+# Set TTS_PLUGIN=vits2_tts_language and CONFIG_PATH=/work/config.language.yaml.
+mcp_port: 15720
+
+plugins:
+  asr:
+    enabled: false
+    asr_model: paraformer-zh-en   # paraformer-zh-en | zipformer-en | sensevoice-small
+    model_dir: /models/sherpa-onnx/asr
+    hw_provider: cpu
+    num_threads: 2
+    language: zh-CN
+    vad:
+      model: sherpa_onnx    # sherpa_onnx (ONNX, lightweight) | silero (PyTorch) | webrtc
+      threshold: 0.5
+      silence_ms: 400
+    kws:
+      enabled: true
+      model_dir: /models/sherpa-onnx/kws
+      keywords:
+        - "x iǎo f àn x iǎo f àn @小范小范"
+
+  tts:
+    enabled: false
+    model_dir: /models/sherpa-onnx/tts
+    speaker_id: 0
+    speed: 1.0
+
+  vits2_tts_trt:
+    enabled: false
+    backend: trt           # Fail on unavailable TensorRT; do not fall back to CPU.
+    speaker_id: 0
+    speed: 1.0
+    vits2_model_dir: /models/vits2-mix
+    vits2_num_threads: 1
+    vits2_max_chunk_tokens: 256
+    vits2_warmup: true
+
+  vits2_tts_language:
+    enabled: true
+    backend: trt           # Fail on unavailable TensorRT; do not fall back to CPU.
+    speaker_id: 0
+    speed: 1.0
+    reply_language: auto  # Unclear input language defaults to Chinese.
+    vits2_model_dir: /models/vits2-mix
+    vits2_num_threads: 1
+    vits2_max_chunk_tokens: 256
+    vits2_warmup: true
+
+  htmsg:
+    enabled: false
+    namespace: ""       # auto-detect from hostname if empty
+    keyframe:
+      dist_thresh: 1.0    # meters — insert keyframe when moved this far
+      angle_thresh: 0.35  # radians (~20°) — or rotated this much
+    semantic:
+      model: "mobileclip"
+      sam_model: "sam2_tiny"
+      confidence_decay: 0.95
+    graph:
+      db_path: "/opt/phanthy-motus/data/htmsg"
+      max_nodes: 500
+
+  vop:
+    enabled: false
+    namespace: ""       # auto-detect from hostname if empty
+    model: "yolov8s-worldv2"
+    confidence: 0.3
+    classes: []         # empty = default broad set
+    fps: 5

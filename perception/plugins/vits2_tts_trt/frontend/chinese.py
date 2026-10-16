@@ -253,9 +253,11 @@ def _special_number(value, language):
     return sign + normalize_numbers(value)
 
 
-def _normalize_raw_text(text):
+def _normalize_raw_text(text, lexeme_language="MIX"):
     return normalize_special_text(
-        text, lambda ordinary: _normalizer.normalize(apply_lexeme_rules(ordinary)),
+        text, lambda ordinary: _normalizer.normalize(
+            apply_lexeme_rules(ordinary, language=lexeme_language)
+        ),
         _special_number,
     )
 
@@ -275,8 +277,16 @@ def mix_normalize(text: str) -> str:
     such as ``AI`` and ``CTO`` into letter-by-letter forms before G2P.
     """
     from .english import replace_punctuation as en_replace_punct
+    from .mixed_context import normalize_mixed_context
     text = _remove_redundant_newlines_after_punctuation(text)
-    text = _normalize_raw_text(text)
+    # Select lexeme language from the complete input, never a Chinese clause's
+    # isolated Latin name (e.g. Qwen in a Chinese product list).
+    normalize_original = _normalize_raw_text
+    if re.search(r"[A-Za-z]", text) and not re.search(r"[\u4e00-\u9fff]", text):
+        normalize_original = lambda value: _normalize_raw_text(value, lexeme_language="EN")
+    text = normalize_mixed_context(
+        text, normalize_original, _normalizer.normalize, _special_number
+    )
     text = normalize_technical_lexemes(_post_replace(text))
     text = en_replace_punct(text)
     return text

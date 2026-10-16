@@ -59,6 +59,7 @@ _PROTECTED_TOKENS = [
 # 3) Acronyms that are read letter by letter. CNCF uses dots: space-separated
 #    letters come out as one continuous block (770 ms, no gap).
 _LETTER_SPELLED = [
+    (re.compile(r"(?<![A-Za-z0-9_])waic(?![A-Za-z0-9_])", re.I), "W A I C"),
     (_edge(r"aios"), "A I O S"),
     (_edge(r"dcu"), "D C U"),
     (_edge(r"mlu"), "M L U"),
@@ -97,6 +98,22 @@ _FUSED_NAMES = [
 #    other three-digit numbers are read digit by digit (九一零/三七零).
 _CN_NAMES = [
     (_edge(r"qwen"), "千问"),
+    # The generated source contains a literal "+" used as an annotation
+    # separator. Keep its data intact, but never send that sign to TTS.
+    (_edge(r"01\.AI"), "零一 点 A I"),
+]
+
+
+def _ascend_model(match) -> str:
+    """Keep model digit readings only with an explicit Ascend/昇腾 prefix."""
+    model = match.group("model")
+    digits = "三一零" if model.startswith("310") else "九一零"
+    return match.group("brand") + " " + digits + model[3:]
+
+
+_CONTEXT_MODEL_DIGITS = [
+    (_edge(r"(?P<brand>Ascend|昇腾)[ \t]*(?:[-‑–—][ \t]*)?"
+           r"(?P<model>310P?|910[ABC]?)"), _ascend_model),
 ]
 
 _MODEL_DIGITS = [
@@ -143,10 +160,7 @@ _MODEL_DIGITS = [
     (_edge(r"v5e"), "v五e"),
     (_edge(r"v5p"), "v五p"),
     (_edge(r"v6e"), "v六e"),
-    (_edge(r"310"), "三一零"),
-    (_edge(r"910"), "九一零"),
     (_edge(r"C3"), "C三"),
-    (_edge(r"01"), "零一"),
     (_edge(r"T5"), "T五"),
     (_edge(r"F1"), "F一"),
     (_edge(r"L4"), "L四"),
@@ -154,8 +168,6 @@ _MODEL_DIGITS = [
     (_edge(r"v4"), "v四"),
     (_edge(r"v7"), "v七"),
     (_edge(r"D1"), "D一"),
-    (_edge(r"2"), "二"),
-    (_edge(r"3"), "三"),
 ]
 
 # Order matters: phrase rules first, then longer alternatives before shorter ones
@@ -164,6 +176,7 @@ _MODEL_DIGITS = [
 RULES = (
     _PHRASE_RULES
     + _CN_NAMES
+    + _CONTEXT_MODEL_DIGITS
     + _MODEL_DIGITS
     + _NUMBER_RULES
     + _PROTECTED_TOKENS
@@ -204,6 +217,11 @@ _CURATED_KEYS = {_pattern_literal_key(pattern) for pattern, _ in RULES}
 _GENERATED_RULES = []
 for _term, _spoken in GENERATED_REPLACEMENTS.items():
     _key = _generated_key(_term)
+    # Bare numerals are quantities, dates, identifiers or model numbers only
+    # in context. Leave them to the numeric frontend instead of globally
+    # applying the generated company/name entry "111" -> "one one one".
+    if _term.strip().isdecimal():
+        continue
     if len(_term.strip()) < 2 or _term.casefold() == _spoken.casefold():
         continue
     if _key in _CURATED_KEYS:
@@ -234,7 +252,24 @@ def _qwen_version(match) -> str:
     return "千问" + spoken
 
 
-def apply_lexeme_rules(text: str) -> str:
+def has_chinese_name_reading(token: str) -> bool:
+    """Whether one complete name has a curated, entirely Chinese reading.
+
+    Used for standalone names in a Chinese list, not to translate English
+    clauses or arbitrary substrings. Numbered Qwen names keep the same bounds
+    and version grammar as the existing pronunciation rule.
+    """
+    if _QWEN_VERSION_RE.fullmatch(token):
+        return True
+    return any(
+        pattern.fullmatch(token)
+        and re.search(r"[\u4e00-\u9fff]", spoken)
+        and not re.search(r"[A-Za-z]", spoken)
+        for pattern, spoken in _CN_NAMES
+    )
+
+
+def apply_lexeme_rules(text: str, language: str = "MIX") -> str:
     """Rewrite known English lexemes into their intended spoken form."""
     if not text:
         return text
@@ -242,15 +277,24 @@ def apply_lexeme_rules(text: str) -> str:
     # Protect generated frontend_res matches from the older broad rules.
     protected = []
     for pattern, replacement in _GENERATED_RULES:
+        if language == "EN" and re.search(r"[\u4e00-\u9fff]", replacement):
+            continue
         def _protect(match):
             marker = f"\\x00LEX{len(protected)}\\x00"
             protected.append((marker, replacement))
             return marker
         text = pattern.sub(_protect, text)
 
-    text = _QWEN_VERSION_RE.sub(_qwen_version, text)
+    if language != "EN":
+        text = _QWEN_VERSION_RE.sub(_qwen_version, text)
     for pattern, replacement in RULES:
-        text = pattern.sub(replacement, text)
+        if language == "EN":
+            def _english_replacement(match):
+                spoken = replacement(match) if callable(replacement) else match.expand(replacement)
+                return match.group() if re.search(r"[\u4e00-\u9fff]", spoken) else spoken
+            text = pattern.sub(_english_replacement, text)
+        else:
+            text = pattern.sub(replacement, text)
     for marker, replacement in protected:
         text = text.replace(marker, replacement)
     return text

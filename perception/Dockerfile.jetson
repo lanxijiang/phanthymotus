@@ -38,6 +38,9 @@ WORKDIR /work
 COPY perception/main.py /work/main.py
 COPY perception/config.yaml /work/config.yaml
 COPY perception/plugins/vits2_tts_trt/ /work/plugins/vits2_tts_trt/
+# Optional conversation language policy; Darvin keeps the default TTS contract.
+COPY perception/config.language.yaml /work/config.language.yaml
+COPY perception/plugins/vits2_tts_language/ /work/plugins/vits2_tts_language/
 COPY perception/utils/__init__.py /work/utils/__init__.py
 COPY perception/utils/model_downloader.py /work/utils/model_downloader.py
 

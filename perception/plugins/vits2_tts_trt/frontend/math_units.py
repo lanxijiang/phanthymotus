@@ -2,6 +2,7 @@
 
 import re
 from decimal import Decimal
+from functools import lru_cache
 
 
 # key: Chinese, singular English, plural English. Long units match first.
@@ -26,21 +27,46 @@ _UNITS = {
     "GB": ("G B", "gigabyte", "gigabytes"),
     "MB": ("M B", "megabyte", "megabytes"),
     "KB": ("K B", "kilobyte", "kilobytes"),
+    "A": ("安培", "ampere", "amperes"),
+    "mA": ("毫安", "milliampere", "milliamperes"),
+    "dB": ("分贝", "decibel", "decibels"),
 }
-_NUMBER = r"\d+(?:\.\d+)?"
+_NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_DASH = r"\-‐‑−﹣－"
+_NORMALIZE_DASH = str.maketrans({char: "-" for char in "‐‑−﹣－"})
 _UNIT_FORMS = sorted(_UNITS, key=len, reverse=True)
 _UNIT_PATTERN = "|".join(re.escape(unit).replace(r"/", r"\s*/\s*") for unit in _UNIT_FORMS)
+_UNIT_EXPR = rf"(?:{_UNIT_PATTERN})|℃|℉|(?i:degrees?\s+(?:Celsius|Fahrenheit))"
+_UNIT_END = r"(?![A-Za-z0-9_/²³^])"
+_COMPARATOR_PATTERN = r"<=|>=|!=|[=<>≤≥≠]"
 _MEASURE = re.compile(
-    rf"(?<![A-Za-z0-9_.])(?P<number>[+-]?{_NUMBER})\s*"
-    rf"(?P<unit>(?:{_UNIT_PATTERN})|℃|℉|(?i:degrees?\s+(?:Celsius|Fahrenheit)))"
-    r"(?![A-Za-z0-9_/²³^])"
+    rf"(?<![A-Za-z0-9_.])(?P<uncertainty>±\s*)?(?P<number>[+-]?{_NUMBER})\s*"
+    rf"(?P<unit>{_UNIT_EXPR}){_UNIT_END}"
 )
-_ATOM = rf"(?<![A-Za-z0-9_.])(?:{_NUMBER}|[A-Za-z])(?![A-Za-z0-9_])|π"
+_SCIENTIFIC = re.compile(
+    rf"(?<![A-Za-z0-9_.])(?P<mantissa>[+{_DASH}]?{_NUMBER})[eE]"
+    rf"(?P<exponent>[+{_DASH}]?\d+)(?![0-9_]|\.\d)"
+    rf"(?:\s*(?P<unit>{_UNIT_EXPR}){_UNIT_END}|(?![A-Za-z0-9_/²³^]))"
+)
+_SCIENTIFIC_CORE = re.compile(
+    rf"(?<![A-Za-z0-9_.])[+-]?{_NUMBER}[eE][+-]?\d+(?![0-9_]|\.\d)"
+)
+_TEMPERATURE_RANGE = re.compile(
+    rf"(?<![A-Za-z0-9_.])(?P<low>[+-]?{_NUMBER})\s*(?P<low_unit>℃|℉|°C|°F)"
+    rf"\s*(?:～|~|–|—|-|(?i:to))\s*"
+    rf"(?P<high>[+-]?{_NUMBER})\s*(?P<high_unit>℃|℉|°C|°F){_UNIT_END}"
+)
+_FRACTION = re.compile(
+    r"(?<![A-Za-z0-9_./])(?P<numerator>\d+)\s*/\s*(?P<denominator>\d+)"
+    r"(?![A-Za-z0-9_/]|\.\d)"
+)
+_COEFFICIENT = rf"{_NUMBER}[A-Za-z]"
+_ATOM = rf"(?<![A-Za-z0-9_.])(?:{_COEFFICIENT}|{_NUMBER}|[A-Za-z])(?![A-Za-z0-9_])|π"
 _TOKEN = rf"(?:{_ATOM}|<=|>=|!=|[+\-*×/÷^=<>≤≥≠²³()])"
 _CANDIDATE = re.compile(rf"{_TOKEN}(?:\s*{_TOKEN})*")
 _TOKENIZER = re.compile(_TOKEN)
 _PRESERVE = re.compile(
-    r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|"
+    rf"(?<![A-Za-z0-9_])\d{{4}}[{_DASH}/]\d{{1,2}}[{_DASH}/]\d{{1,2}}(?![A-Za-z0-9_])|"
     r"\b\d[\d-]*-[A-Za-z]{2}[A-Za-z0-9.-]*"
 )
 _OPERATORS = {
@@ -58,13 +84,33 @@ _OPERATORS = {
 }
 
 
+@lru_cache(maxsize=1)
+def _english_cardinals():
+    # inflect is already part of the released English frontend environment.
+    import inflect
+    return inflect.engine()
+
+
+def _english_quantity(value):
+    """Read explicit measurements/math as quantities, never as calendar years."""
+    sign = ""
+    if value.startswith(("+", "-")):
+        sign, value = ("plus " if value[0] == "+" else "minus "), value[1:]
+    whole, dot, fraction = value.partition(".")
+    spoken = _english_cardinals().number_to_words(int(whole or "0"), andword="").replace(",", "")
+    if dot:
+        digits = "zero one two three four five six seven eight nine".split()
+        spoken += " point " + " ".join(digits[int(char)] for char in fraction)
+    return sign + spoken
+
+
 def _valid_math(tokens):
     """Validate token order, returning implicit multiplication positions."""
     expect_operand, depth, explicit = True, 0, False
     implicit = set()
     for index, token in enumerate(tokens):
         value = token.group()
-        atom = bool(re.fullmatch(rf"{_NUMBER}|[A-Za-zπ]", value))
+        atom = bool(re.fullmatch(rf"{_COEFFICIENT}|{_NUMBER}|[A-Za-zπ]", value))
         if expect_operand:
             if value == "(":
                 depth += 1
@@ -124,6 +170,9 @@ def _speak_math(tokens, implicit, language, verbalize_number):
             continue
         if re.fullmatch(_NUMBER, value):
             words.append(verbalize_number(value, language))
+        elif re.fullmatch(_COEFFICIENT, value):
+            words.extend((verbalize_number(value[:-1], language),
+                          "乘以" if zh else "times", value[-1]))
         elif value in {"+", "-"} and expect_operand:
             words.append(("正" if value == "+" else "负") if zh else
                          ("positive" if value == "+" else "negative"))
@@ -134,28 +183,122 @@ def _speak_math(tokens, implicit, language, verbalize_number):
     return " ".join(words)
 
 
+def _canonical_unit(unit):
+    unit = re.sub(r"\s+", "", unit)
+    if unit in {"℃", "℉"} or "celsius" in unit.lower() or "fahrenheit" in unit.lower():
+        return "°C" if unit == "℃" or "celsius" in unit.lower() else "°F"
+    return unit
+
+
+def _unit_label(unit, value, zh):
+    return _UNITS[_canonical_unit(unit)][0 if zh else (1 if abs(Decimal(value.replace(",", ""))) == 1 else 2)]
+
+
+def _measure_spoken(value, unit, language, verbalize_number):
+    zh = language.lower().startswith("zh")
+    number = verbalize_number(value, language)
+    label = _unit_label(unit, value, zh)
+    return f"百分之 {number}" if zh and unit == "%" else f"{number} {label}"
+
+
+def _comparison_prefix(text, start, spoken, zh):
+    """Include a directly preceding comparison without consuming its label."""
+    prefix = re.search(rf"(?P<op>{_COMPARATOR_PATTERN})\s*$", text[:start])
+    if prefix:
+        return prefix.start(), _OPERATORS[prefix["op"]][not zh] + " " + spoken
+    return start, spoken
+
+
+def _fraction_context(text, match):
+    """Numeric a/b is a fraction unless a local arithmetic context is explicit."""
+    left = re.split(r"[。！？!?，,；;\n]", text[:match.start()])[-1][-48:]
+    right = text[match.end():]
+    if re.search(r"算式|计算|除法|除以|(?i:\b(?:calculate|compute|divide|division|equation)\b)", left):
+        return False
+    # A slash within an equation or a compound expression remains an operator.
+    if re.search(r"[=+\-*×÷^<>≤≥≠(]\s*$", left) or re.match(r"\s*[=+*×÷^<>≤≥≠)]", right):
+        return False
+    if re.search(r"\d\s*-\s*$", left) or re.match(r"\s*-\s*\d", right):
+        return False
+    return True
+
+
 def find_spans(text, language, verbalize_number):
     """Return nonoverlapping ``(start, end, spoken)`` spans; URLs are excluded upstream.
 
     ``verbalize_number(value, language)`` receives the original numeric spelling,
     including decimal zeroes. Language can be ``ZH``/``EN`` or ``zh``/``en``.
     """
+    # Retain original offsets, including grouping commas, while passing a
+    # canonical numeric value to the existing language-specific number reader.
+    original_number_reader = verbalize_number
+    def verbalize_number(value, number_language):
+        value = value.replace(",", "")
+        if number_language.lower().startswith("en"):
+            return _english_quantity(value)
+        return original_number_reader(value, number_language)
+
     zh = language.lower().startswith("zh")
+    # Translation is length preserving, so offsets still refer to the input.
+    text = text.translate(_NORMALIZE_DASH)
     spans = []
     preserved = [(match.start(), match.end()) for match in _PRESERVE.finditer(text)]
+    scientific_cores = [(match.start(), match.end()) for match in _SCIENTIFIC_CORE.finditer(text)]
+
+    def overlaps(start, end):
+        return any(start < b and end > a for a, b in preserved) or any(
+            start < b and end > a for a, b, _ in spans)
+
+    for match in _TEMPERATURE_RANGE.finditer(text):
+        if overlaps(match.start(), match.end()):
+            continue
+        low = _measure_spoken(match["low"], match["low_unit"], language, verbalize_number)
+        high = _measure_spoken(match["high"], match["high_unit"], language, verbalize_number)
+        spoken = f"{low} {'到' if zh else 'to'} {high}"
+        spans.append((match.start(), match.end(), spoken))
+
+    for match in _SCIENTIFIC.finditer(text):
+        if overlaps(match.start(), match.end()):
+            continue
+        mantissa, exponent = match["mantissa"], match["exponent"]
+        base = verbalize_number(mantissa, language)
+        exponent_reading = verbalize_number(exponent, language)
+        spoken = (f"{base} 乘以 十的 {exponent_reading} 次方" if zh else
+                  f"{base} times ten to the power of {exponent_reading}")
+        if match["unit"]:
+            if zh and match["unit"] == "%":
+                spoken = "百分之 " + spoken
+            else:
+                spoken += " " + _unit_label(match["unit"], f"{mantissa}e{exponent}", zh)
+        start, spoken = _comparison_prefix(text, match.start(), spoken, zh)
+        if not overlaps(start, match.end()):
+            spans.append((start, match.end(), spoken))
+
     for match in _MEASURE.finditer(text):
-        if any(match.start() < end and match.end() > start for start, end in preserved):
+        if overlaps(match.start(), match.end()):
             continue
         value = match["number"]
-        unit = re.sub(r"\s+", "", match["unit"])
-        if unit in {"℃", "℉"} or "celsius" in unit.lower() or "fahrenheit" in unit.lower():
-            unit = "°C" if unit == "℃" or "celsius" in unit.lower() else "°F"
-        number = verbalize_number(value, language)
-        label = _UNITS[unit][0 if zh else (1 if abs(Decimal(value)) == 1 else 2)]
-        spoken = f"百分之 {number}" if zh and unit == "%" else f"{number} {label}"
+        spoken = _measure_spoken(value, match["unit"], language, verbalize_number)
+        if match["uncertainty"]:
+            spoken = ("正负 " if zh else "plus or minus ") + spoken
+        start, spoken = _comparison_prefix(text, match.start(), spoken, zh)
+        if not overlaps(start, match.end()):
+            spans.append((start, match.end(), spoken))
+
+    for match in _FRACTION.finditer(text):
+        if overlaps(match.start(), match.end()) or not _fraction_context(text, match):
+            continue
+        numerator = verbalize_number(match["numerator"], language)
+        denominator = verbalize_number(match["denominator"], language)
+        spoken = f"{denominator} 分之 {numerator}" if zh else f"{numerator} over {denominator}"
         spans.append((match.start(), match.end(), spoken))
     for candidate in _CANDIDATE.finditer(text):
         if any(candidate.start() < end and candidate.end() > start for start, end in preserved):
+            continue
+        # Never reinterpret an unsupported scientific quantity such as
+        # 1e-4kg/day as the incomplete formula "1 times e minus 4".
+        if any(candidate.start() < end and candidate.end() > start
+               for start, end in scientific_cores):
             continue
         if re.fullmatch(r"[A-Za-z]\s*/\s*[A-Za-z]", candidate.group().strip()):
             continue  # I/O and similar notation are not unambiguous division.
