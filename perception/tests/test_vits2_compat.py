@@ -227,6 +227,63 @@ class StandardCompatibilityTest(unittest.TestCase):
         self.assertEqual(node.policy.snapshot()["turn_id"], turn["turn_id"])
         self.assert_code("stale_turn", lambda: self.call("speak", instance_id="a", text="Hello"))
 
+    def test_asr_dialogue_contract_is_opt_in_and_preserves_direct_benchmark_instance(self):
+        conversation, benchmark = self.start("conversation"), self.start("benchmark")
+        event = {"text": "你好，can you check the robot?", "lang": "en"}
+        turn = self.call("language", instance_id="conversation", asr_result=event)
+        self.assertEqual((turn["reply_language"], turn["language_source"]), ("en", "asr"))
+        self.assertIn("mainly in English", turn["instruction"])
+        self.assertEqual(self.adapter.frontend_inputs, [])
+        self.assertTrue(conversation._explicit_language_contract)
+        self.assertFalse(benchmark._explicit_language_contract)
+        # The caller would give instruction to its dialogue model here. This
+        # test supplies that boundary's reply; it does not run or simulate an LLM.
+        reply = "The robot is ready. 状态正常。"
+        self.assert_code("stale_turn", lambda: self.call(
+            "speak", instance_id="conversation", text=reply,
+        ))
+        accepted = self.call("speak", instance_id="conversation", text=reply,
+                             turn_id=turn["turn_id"])
+        queued = conversation._text_queue.get_nowait()
+        self.assertEqual((accepted["status"], queued.text, queued.language, queued.turn_id),
+                         ("queued", reply, "en", turn["turn_id"]))
+        self.assertNotIn("speech_mode", accepted)
+        direct = self.call("speak", instance_id="benchmark", text="这是榜单测试文本。")
+        queued = benchmark._text_queue.get_nowait()
+        self.assertEqual((direct["speech_mode"], queued.language), ("direct", "zh"))
+        self.assertFalse(benchmark._explicit_language_contract)
+        self.assertEqual(self.adapter.spoken, [])
+
+    def test_invalid_asr_result_preserves_direct_mode_and_does_not_clear_dialogue_turn(self):
+        node = self.start()
+        direct = self.call("speak", instance_id="a", text="Hello.")
+        node._text_queue.get_nowait()
+        for event, code in ((None, "invalid_asr_result"),
+                            ({"text": "Hello", "lang": []}, "invalid_asr_language")):
+            with self.subTest(event=event):
+                self.assert_code(code, lambda: self.call(
+                    "language", instance_id="a", asr_result=event,
+                ))
+                self.assertFalse(node._explicit_language_contract)
+                self.assertEqual(node.policy.snapshot()["turn_id"], direct["turn_id"])
+                self.assertTrue(node._text_queue.empty())
+        resumed = self.call("speak", instance_id="a", text="仍然可以直接播报。")
+        self.assertEqual(resumed["speech_mode"], "direct")
+        node._text_queue.get_nowait()
+        turn = self.call("language", instance_id="a",
+                         asr_result={"text": "Hello", "lang": "en"})
+        self.assert_code("conflicting_input_language", lambda: self.call(
+            "language", instance_id="a", input_language="zh",
+            asr_result={"text": "Hello", "lang": "en"},
+        ))
+        self.assertTrue(node._explicit_language_contract)
+        self.assertEqual(node.policy.snapshot()["turn_id"], turn["turn_id"])
+        self.assert_code("stale_turn", lambda: self.call(
+            "speak", instance_id="a", text="Hello again.",
+        ))
+        self.call("speak", instance_id="a", text="Hello again.", turn_id=turn["turn_id"])
+        self.assertEqual(node._text_queue.get_nowait().language, "en")
+
     def test_direct_english_quotes_and_addresses_use_speech_not_asr(self):
         node = self.start()
         for raw in ('"Hello there."', "'Hello there.'", "https://example.com/Qwen3",

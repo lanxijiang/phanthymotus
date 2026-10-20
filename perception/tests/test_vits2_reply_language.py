@@ -548,8 +548,131 @@ class LanguagePluginTest(unittest.TestCase):
         tool = next(item for item in tools if item["name"] == "tts")
         properties = tool["inputSchema"]["properties"]
         self.assertIn("language", properties["action"]["enum"])
-        for key in ("instance_id", "turn_id", "input_language", "requested_reply_language"):
+        for key in ("instance_id", "turn_id", "input_language", "requested_reply_language",
+                    "asr_result"):
             self.assertIn(key, properties)
+        self.assertEqual(properties["asr_result"]["type"], "object")
+        self.assertIn("text", properties["asr_result"]["required"])
+
+    def test_asr_result_selects_detected_language_before_text_and_preserves_event(self):
+        node = self.start()
+        for raw, tag, expected, language_name in (
+            ("你好，请检查设备。", "en", "en", "English"),
+            ("Please check the device.", "zh", "zh", "Chinese"),
+            ("Please check the device.", "zh-CN", "zh", "Chinese"),
+            ("你好，请检查设备。", "en_US", "en", "English"),
+        ):
+            with self.subTest(tag=tag):
+                event = {"text": raw, "lang": tag, "audio_event": "Speech",
+                         "extra": {"request": 7}}
+                before = json.dumps(event, sort_keys=True)
+                turn = self.call("language", instance_id="a", asr_result=event)
+                self.assertEqual(
+                    (turn["reply_language"], turn["detected_language"], turn["language_source"]),
+                    (expected, expected, "asr"),
+                )
+                self.assertIn("mainly in " + language_name, turn["instruction"])
+                self.assertEqual(json.dumps(event, sort_keys=True), before)
+                event["lang"] = "zh" if expected == "en" else "en"
+                event["text"] = "Changed after the accepted request."
+                self.assertEqual(node.policy.snapshot()["resolved_language"], expected)
+        self.assertEqual(self.adapter.frontend_inputs, [])
+        self.assertTrue(node._text_queue.empty())
+
+    def test_asr_result_respects_fixed_panel_and_current_explicit_request(self):
+        self.start()
+        for mode, tag, expected in (
+            ("中文", "en", "zh"), ("English", "zh", "en"), ("自动", "en", "en"),
+        ):
+            with self.subTest(mode=mode):
+                self.call("config", instance_id="a", reply_language=mode)
+                turn = self.call("language", instance_id="a",
+                                 asr_result={"text": "2026 10/ 20", "lang": tag})
+                self.assertEqual(turn["reply_language"], expected)
+                self.assertEqual(turn["language_source"], "asr" if mode == "自动" else "fixed")
+        self.call("config", instance_id="a", reply_language="中文")
+        turn = self.call("language", instance_id="a", requested_reply_language="en",
+                         asr_result={"text": "你好", "lang": "zh"})
+        self.assertEqual((turn["reply_language"], turn["language_source"]), ("en", "requested"))
+        self.assertEqual(self.plugin._nodes["a"].policy.snapshot()["reply_language"], "zh")
+
+    def test_missing_unknown_asr_tags_use_text_and_neutral_fallback_not_config_language(self):
+        self.start()
+        for tags in ({}, {"lang": None}, {"lang": ""}, {"lang": "auto"}, {"lang": "ja"},
+                     {"language": "zh-CN"}, {"lang": "unknown", "language": "zh-CN"}):
+            with self.subTest(tags=tags):
+                turn = self.call("language", instance_id="a",
+                                 asr_result={"text": "Hello, how are you?", **tags})
+                self.assertEqual((turn["reply_language"], turn["language_source"]), ("en", "text"))
+                neutral = self.call("language", instance_id="a",
+                                    asr_result={"text": "2026 10/ 20", **tags})
+                self.assertEqual(
+                    (neutral["reply_language"], neutral["detected_language"],
+                     neutral["language_source"]),
+                    ("zh", None, "default"),
+                )
+        # A configuration value cannot turn an otherwise ambiguous utterance English.
+        neutral = self.call("language", instance_id="a",
+                            asr_result={"text": "2026", "language": "en-US"})
+        self.assertEqual((neutral["reply_language"], neutral["language_source"]), ("zh", "default"))
+
+    def test_invalid_asr_event_does_not_replace_accepted_turn_or_queued_reply(self):
+        node = self.start()
+        turn = self.call("language", instance_id="a",
+                         asr_result={"text": "Hello.", "lang": "en"})
+        self.call("speak", instance_id="a", text="Welcome back.", turn_id=turn["turn_id"])
+        for fields, code in (
+            ({"asr_result": None}, "invalid_asr_result"),
+            ({"asr_result": []}, "invalid_asr_result"),
+            ({"asr_result": '{"text":"Hello","lang":"en"}'}, "invalid_asr_result"),
+            ({"asr_result": {}}, "invalid_asr_result"),
+            ({"asr_result": {"text": ["Hello"], "lang": "en"}}, "invalid_asr_result"),
+            ({"asr_result": {"text": "  ", "lang": "en"}}, "invalid_asr_result"),
+            ({"asr_result": {"text": "Hello", "lang": ["en"]}}, "invalid_asr_language"),
+            ({"asr_result": {"text": "Hello", "lang": True}}, "invalid_asr_language"),
+            ({"text": "Different input", "asr_result": {"text": "Hello", "lang": "en"}},
+             "conflicting_user_text"),
+            ({"input_language": "zh", "asr_result": {"text": "Hello", "lang": "en_US"}},
+             "conflicting_input_language"),
+            ({"input_language": "fr", "asr_result": {"text": "Hello", "lang": "en"}},
+             "invalid_input_language"),
+        ):
+            with self.subTest(fields=fields):
+                self.assert_code(code, lambda: self.call("language", instance_id="a", **fields))
+                snapshot = node.policy.snapshot()
+                self.assertEqual((snapshot["turn_id"], snapshot["resolved_language"]),
+                                 (turn["turn_id"], "en"))
+                self.assertEqual(node._text_queue.qsize(), 1)
+                self.assertEqual(self.adapter.frontend_inputs, ["Welcome back."])
+        queued = node._text_queue.get_nowait()
+        self.assertEqual((queued.text, queued.language, queued.turn_id),
+                         ("Welcome back.", "en", turn["turn_id"]))
+        self.call("speak", instance_id="a", text="Still ready.", turn_id=turn["turn_id"])
+        self.assertEqual(node._text_queue.get_nowait().text, "Still ready.")
+        matched = self.call("language", instance_id="a", text="Hello", input_language="en",
+                            asr_result={"text": "Hello", "lang": "en_US"})
+        self.assertEqual((matched["reply_language"], matched["language_source"]), ("en", "asr"))
+
+    def test_asr_result_turns_stay_with_their_instance_and_reject_stale_replies(self):
+        a, b = self.start("a"), self.start("b")
+        first = self.call("language", instance_id="a",
+                          asr_result={"text": "Hello.", "lang": "en"})
+        other = self.call("language", instance_id="b",
+                          asr_result={"text": "你好。", "lang": "zh"})
+        current = self.call("language", instance_id="a",
+                            asr_result={"text": "请用中文继续。", "lang": "zh"})
+        for token in (first["turn_id"], other["turn_id"]):
+            with self.subTest(token=token):
+                self.assert_code("stale_turn", lambda: self.call(
+                    "speak", instance_id="a", text="你好。", turn_id=token,
+                ))
+        self.assertTrue(a._text_queue.empty())
+        self.assertTrue(b._text_queue.empty())
+        self.assertEqual(b.policy.snapshot()["turn_id"], other["turn_id"])
+        for key, turn in (("a", current), ("b", other)):
+            self.call("speak", instance_id=key, text="你好。", turn_id=turn["turn_id"])
+        self.assertEqual(a._text_queue.get_nowait().turn_id, current["turn_id"])
+        self.assertEqual(b._text_queue.get_nowait().turn_id, other["turn_id"])
 
     def test_language_control_shares_speed_panel_and_uses_display_values(self):
         tool = self.plugin.get_tools()[0]

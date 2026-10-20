@@ -30,6 +30,46 @@ instance is removed. Repeated start or config cannot disable this check.
 Explicit null, empty or incorrect tokens never trigger direct-speech fallback.
 The original vits2_tts_language implementation remains available and strict.
 
+ASR message integration:
+  The language action also accepts the current ASR result object directly:
+
+  {
+    "action": "language",
+    "instance_id": "robot_1",
+    "asr_result": {"text": "Hello, how are you?", "lang": "en"}
+  }
+
+  Start robot_1 first. The response contains reply_language, language_source,
+  instruction and turn_id. The caller gives instruction to the dialogue model
+  BEFORE it generates the answer, then sends that answer through speak with
+  this turn_id. Sending ASR text to speak would read the user's words aloud;
+  it would not generate a reply.
+
+  This reads SenseVoice's detected `lang`, not the configured `language`.
+  Supported labels are zh/en; explicit aliases zh-CN, zh-TW, zh-Hans, zh-Hant,
+  en-US, en-GB and en-AU are accepted case-insensitively, also with underscores.
+  Missing, empty or unknown tags use the existing current-text detection and
+  Chinese fallback. Other ASR metadata is ignored and the input is not mutated.
+  A non-object result, missing/empty text or non-string non-null lang is rejected.
+
+  Legacy text/input_language calls still work. If both forms are supplied,
+  text must agree (ignoring outer whitespace), and a valid ASR label must not
+  contradict input_language. Invalid input leaves the accepted turn and queue
+  intact. Successful calls create a new turn_id within that conversation;
+  the caller must associate each ASR message with the correct instance.
+
+  Priority remains: explicit requested_reply_language > fixed panel preference
+  > valid ASR label > current user text > Chinese fallback.
+  Automatic mode may therefore read a numeric-only turn in English if its
+  actual ASR label is en; numbers without a valid tag still default to Chinese.
+
+  This is a plugin input adapter, not a completed robot deployment. It does not
+  subscribe to an ASR topic or alter agent-core, main.py or the ASR plugin.
+  Upstream main's SenseVoice topic can provide lang when emit_audio_tags is on;
+  the older ASR copy in this branch and the standalone /ws/asr result path only
+  provide text. End-to-end dialogue requires the caller to forward the current
+  ASR result and use the instruction/turn_id sequence above.
+
 Fixed Chinese/English settings choose the primary language and numeric/name
 readings; they do not translate an opposite-language sentence. Both scripts
 may occur in a reply. The original request text is retained; only the frontend

@@ -29,6 +29,49 @@ log = logging.getLogger(__name__)
 
 _REPLY_LANGUAGE_LABELS = {"auto": "自动", "zh": "中文", "en": "English"}
 _REPLY_LANGUAGE_ALIASES = {label: mode for mode, label in _REPLY_LANGUAGE_LABELS.items()}
+_ASR_LANGUAGE_ALIASES = {
+    "zh": "zh", "zh-cn": "zh", "zh-tw": "zh",
+    "zh-hans": "zh", "zh-hant": "zh",
+    "en": "en", "en-us": "en", "en-gb": "en", "en-au": "en",
+}
+
+
+def _language_input(args):
+    """Read one caller-supplied ASR result without retaining or mutating it."""
+    if "asr_result" not in args:
+        return args.get("text"), args.get("input_language")
+    result = args["asr_result"]
+    if not isinstance(result, dict):
+        raise LanguagePolicyError("invalid_asr_result", "asr_result must be an object")
+    text = result.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise LanguagePolicyError(
+            "invalid_asr_result", "asr_result.text must be a nonempty string"
+        )
+    if "text" in args and (
+        not isinstance(args["text"], str) or args["text"].strip() != text.strip()
+    ):
+        raise LanguagePolicyError(
+            "conflicting_user_text", "text and asr_result.text must describe the same input"
+        )
+    # Main's SenseVoice publisher exposes the detected tag as `lang`.
+    # `language` is a configuration value, not evidence about this utterance.
+    raw_language = result.get("lang")
+    if raw_language is not None and not isinstance(raw_language, str):
+        raise LanguagePolicyError("invalid_asr_language", "asr_result.lang must be a string")
+    detected = _ASR_LANGUAGE_ALIASES.get(
+        (raw_language or "").strip().lower().replace("_", "-")
+    )
+    supplied = args.get("input_language")
+    if supplied is not None and supplied not in ("zh", "en"):
+        raise LanguagePolicyError("invalid_input_language", "input_language must be zh or en")
+    if supplied is not None and detected is not None and supplied != detected:
+        raise LanguagePolicyError(
+            "conflicting_input_language", "input_language conflicts with asr_result.lang"
+        )
+    # Missing/unknown tags follow the existing text detection and Chinese
+    # fallback. A valid explicit label remains supported for legacy callers.
+    return text, supplied if supplied is not None else detected
 
 
 def _reply_language_mode(value):
@@ -194,8 +237,10 @@ class TTSPlugin(BaseTTSPlugin):
         tool = tools[0]
         tool["description"] = (
             "VITS2 TRT with a shared reply-language preference, per-instance turns and Chinese-English "
-            "mixing. Send user text to language, "
-            "then give its instruction to the dialogue model and pass the returned "
+            "mixing. Before composing a dialogue reply, send the current user's "
+            "ASR result {text, lang} as asr_result to language, or supply user text "
+            "and optional input_language. "
+            "Then give its instruction to the dialogue model and pass the returned "
             "turn_id with that reply. The dialogue caller interprets explicit user "
             "language requests and supplies requested_reply_language; this tool "
             "does not understand arbitrary instructions or retain dialogue history."
@@ -204,6 +249,23 @@ class TTSPlugin(BaseTTSPlugin):
         properties["action"]["enum"].append("language")
         properties.update({
             "instance_id": {"type": "string", "description": "Conversation instance ID"},
+            "asr_result": {
+                "type": "object",
+                "description": (
+                    "Current recognized user message for action=language, forwarded by the caller. "
+                    "Reads text and detected lang only; a language configuration field is ignored. "
+                    "No ASR subscription or reply generation is performed by this tool."
+                ),
+                "properties": {
+                    "text": {"type": "string", "minLength": 1},
+                    "lang": {
+                        "type": "string",
+                        "description": "Detected ASR language, normally zh or en; unknown tags use text fallback",
+                    },
+                },
+                "required": ["text"],
+                "additionalProperties": True,
+            },
             "input_language": {
                 "type": "string", "enum": ["zh", "en"],
                 "description": "Optional whole-turn ASR language for action=language",
@@ -306,8 +368,9 @@ class TTSPlugin(BaseTTSPlugin):
             if action == "language":
                 node = self._node(args)
                 try:
+                    text, input_language = _language_input(args)
                     return node.policy.begin_turn(
-                        args.get("text"), args.get("input_language"),
+                        text, input_language,
                         args.get("requested_reply_language"),
                     )
                 except LanguagePolicyError as exc:
