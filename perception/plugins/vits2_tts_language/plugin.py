@@ -20,9 +20,23 @@ from ..vits2_tts_trt.plugin import (
 from .policy import (
     LanguagePolicy, LanguagePolicyError, SpeechRequest, validate_reply_script,
 )
+from .neutral_text import InvalidDateError, is_neutral_numeric, normalize_neutral_text
+from .name_text import normalize_standalone_name
 
 
 log = logging.getLogger(__name__)
+
+
+_REPLY_LANGUAGE_LABELS = {"auto": "自动", "zh": "中文", "en": "English"}
+_REPLY_LANGUAGE_ALIASES = {label: mode for mode, label in _REPLY_LANGUAGE_LABELS.items()}
+
+
+def _reply_language_mode(value):
+    """Keep display labels at the plugin boundary and canonical modes in policy."""
+    if isinstance(value, str):
+        value = _REPLY_LANGUAGE_ALIASES.get(value, value)
+    LanguagePolicy(value)  # Validate without loading a model.
+    return value
 
 
 @dataclass(frozen=True)
@@ -90,7 +104,12 @@ class _LanguageTTSNode(_Vits2TTSNode):
                 normalized_parts = []
                 prepared_chunks = []
                 try:
-                    for normalized, text_ids in self._inference_adapter.iter_text_chunks(text):
+                    frontend_text = (
+                        normalize_neutral_text(text, request.language)
+                        if is_neutral_numeric(text)
+                        else normalize_standalone_name(text, request.language)
+                    )
+                    for normalized, text_ids in self._inference_adapter.iter_text_chunks(frontend_text):
                         validate_reply_script(
                             normalized, request.language,
                             allow_neutral=True, frontend=True, require_primary=False,
@@ -104,6 +123,8 @@ class _LanguageTTSNode(_Vits2TTSNode):
                         ))
                 except LanguagePolicyError:
                     raise
+                except InvalidDateError as exc:
+                    raise LanguagePolicyError("invalid_date", str(exc)) from None
                 except Exception:
                     raise LanguagePolicyError(
                         "frontend_validation_failed",
@@ -162,8 +183,8 @@ class TTSPlugin(BaseTTSPlugin):
         cfg.setdefault("backend", "trt")
         if cfg["backend"] != "trt":
             raise ValueError("The language-aware plugin requires backend=trt")
-        self._default_reply_language = cfg.get("reply_language", "auto")
-        LanguagePolicy(self._default_reply_language)  # Validate without loading a model.
+        self._default_reply_language = _reply_language_mode(cfg.get("reply_language", "auto"))
+        cfg["reply_language"] = self._default_reply_language
         self._instances_lock = threading.RLock()
         self._reply_modes = {}
         super().__init__(cfg, executor)
@@ -172,7 +193,7 @@ class TTSPlugin(BaseTTSPlugin):
         tools = copy.deepcopy(BASE_TOOLS)
         tool = tools[0]
         tool["description"] = (
-            "VITS2 TRT with per-instance primary reply language and Chinese-English "
+            "VITS2 TRT with a shared reply-language preference, per-instance turns and Chinese-English "
             "mixing. Send user text to language, "
             "then give its instruction to the dialogue model and pass the returned "
             "turn_id with that reply. The dialogue caller interprets explicit user "
@@ -200,16 +221,20 @@ class TTSPlugin(BaseTTSPlugin):
                 "description": "Required for speak; returned by action=language",
             },
             "reply_language": {
-                "type": "string", "enum": ["auto", "zh", "en"],
-                "description": "Primary reply language; Chinese-English mixing is allowed",
+                "type": "string", "enum": ["auto", "zh", "en", "自动", "中文", "English"],
+                "description": (
+                    "Reply-language preference: auto/自动, zh/中文 or en/English. "
+                    "Chinese-English mixing is allowed. Config without instance_id updates "
+                    "the shared default and all instances; with instance_id it updates only that instance"
+                ),
             },
         })
         properties["text"]["description"] = (
             "Original recognized user text for language; dialogue reply text for speak"
         )
         tool["configSchema"]["properties"]["reply_language"] = {
-            "type": "string", "enum": ["auto", "zh", "en"],
-            "default": self._default_reply_language, "scope": "instance",
+            "type": "string", "title": "回复语言", "enum": list(_REPLY_LANGUAGE_LABELS.values()),
+            "default": _REPLY_LANGUAGE_LABELS[self._default_reply_language], "scope": "shared",
             "description": (
                 "Chinese/English preference; mixing is allowed and an explicit "
                 "current-turn requested_reply_language takes priority. Auto uses "
@@ -257,10 +282,9 @@ class TTSPlugin(BaseTTSPlugin):
         with self._instances_lock:
             if action == "start":
                 key = self._instance_id(args)
-                mode = args.get(
+                mode = _reply_language_mode(args.get(
                     "reply_language", self._reply_modes.get(key, self._default_reply_language)
-                )
-                LanguagePolicy(mode)  # Reject invalid configuration before model loading.
+                ))
                 if "input_topic" in args and not isinstance(args["input_topic"], str):
                     raise LanguagePolicyError("invalid_input_topic", "input_topic must be a string")
                 try:
@@ -306,9 +330,9 @@ class TTSPlugin(BaseTTSPlugin):
                 key = None
                 mode = None
                 if has_language:
-                    key = self._instance_id(args)
-                    mode = args["reply_language"]
-                    LanguagePolicy(mode)
+                    if "instance_id" in args:
+                        key = self._instance_id(args)
+                    mode = _reply_language_mode(args["reply_language"])
                 # The product UI sends merged shared/instance settings before
                 # start and before each action. Validate the entire payload
                 # first, then apply only changes; never tear down active nodes.
@@ -334,16 +358,25 @@ class TTSPlugin(BaseTTSPlugin):
                     "speaker_id": int(self._cfg.get("speaker_id", 0)),
                 }
                 if has_language:
-                    self._reply_modes[key] = mode
-                    node = self._nodes.get(key)
-                    result.update(
-                        node.policy.configure(mode) if node is not None else {
-                            "reply_language": mode,
-                            "resolved_language": None,
-                            "turn_id": None,
-                            "last_language_error": None,
-                        }
-                    )
+                    if key is None:
+                        self._default_reply_language = mode
+                        self._cfg["reply_language"] = mode
+                        for instance in self._reply_modes.keys() | self._nodes.keys():
+                            self._reply_modes[instance] = mode
+                        for node in self._nodes.values():
+                            node.policy.configure(mode)
+                        result.update({"reply_language": mode, "default_reply_language": mode})
+                    else:
+                        self._reply_modes[key] = mode
+                        node = self._nodes.get(key)
+                        result.update(
+                            node.policy.configure(mode) if node is not None else {
+                                "reply_language": mode,
+                                "resolved_language": None,
+                                "turn_id": None,
+                                "last_language_error": None,
+                            }
+                        )
                 return result
 
             if action == "stop":
@@ -356,15 +389,17 @@ class TTSPlugin(BaseTTSPlugin):
 
             if action == "info":
                 result = super().dispatch(name, args)
+                result["default_reply_language"] = self._default_reply_language
                 key = args.get("instance_id")
-                if key and key not in self._nodes and key in self._reply_modes:
+                if key and key not in self._nodes:
                     result.update({
-                        "reply_language": self._reply_modes[key],
+                        "reply_language": self._reply_modes.get(key, self._default_reply_language),
                         "resolved_language": None,
                         "turn_id": None,
                         "last_language_error": None,
                     })
                 if not key:
+                    result["reply_language"] = self._default_reply_language
                     result["language_instances"] = {
                         key: node.policy.snapshot() for key, node in self._nodes.items()
                     }

@@ -1,5 +1,8 @@
-# Optional language-policy deployment. Original config.yaml remains unchanged.
+# Optional strict conversation deployment, separate from the Darvin compatibility config.
 # Set TTS_PLUGIN=vits2_tts_language and CONFIG_PATH=/work/config.language.yaml.
+# TTS shared settings (beside speed): 回复语言 = 自动 / 中文 / English.
+# The API also accepts the canonical values auto / zh / en.
+# The dialogue caller still calls language before generating a reply, then speak.
 mcp_port: 15720
 
 plugins:
@@ -41,7 +44,7 @@ plugins:
     backend: trt           # Fail on unavailable TensorRT; do not fall back to CPU.
     speaker_id: 0
     speed: 1.0
-    reply_language: auto  # Unclear input language defaults to Chinese.
+    reply_language: auto  # 自动: detect this turn, else Chinese; zh/en: fixed preference.
     vits2_model_dir: /models/vits2-mix
     vits2_num_threads: 1
     vits2_max_chunk_tokens: 256

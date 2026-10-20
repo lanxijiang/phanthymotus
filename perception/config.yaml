@@ -34,6 +34,17 @@ plugins:
     vits2_max_chunk_tokens: 256
     vits2_warmup: true
 
+  vits2_tts_compat:
+    enabled: true
+    backend: trt
+    speaker_id: 0
+    speed: 1.0
+    reply_language: auto
+    vits2_model_dir: /models/vits2-mix
+    vits2_num_threads: 1
+    vits2_max_chunk_tokens: 256
+    vits2_warmup: true
+
   htmsg:
     enabled: false
     namespace: ""       # auto-detect from hostname if empty

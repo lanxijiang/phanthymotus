@@ -416,6 +416,32 @@ class LanguagePolicyTest(unittest.TestCase):
                 self.assertEqual((request.text, request.language), (reply, language))
                 self.assertEqual(request.turn_id, turn["turn_id"])
 
+    def test_standalone_known_names_keep_original_text_in_both_languages(self):
+        for language in ("zh", "en"):
+            policy = self.module.LanguagePolicy(language)
+            turn = policy.begin_turn("Qwen3")
+            for raw in ("Qwen", "qwen", "Qwen3", "QWEN3", "Qwen2.5", " \tQwen3\n"):
+                with self.subTest(language=language, raw=raw):
+                    request = policy.prepare(raw, turn["turn_id"])
+                    self.assertEqual((request.text, request.language, request.turn_id),
+                                     (raw, language, turn["turn_id"]))
+
+    def test_chinese_name_exception_rejects_clauses_addresses_and_partial_names(self):
+        policy = self.module.LanguagePolicy("zh")
+        turn = policy.begin_turn("Qwen3")
+        before = policy.snapshot()
+        for raw in (
+            "myqwen", "qwenish", "Qwen3x", "Qwen3_abc", "Qwen3/ABC",
+            "Qwen3 is ready", "This is Qwen3", "Qwen3 Qwen3",
+            "https://qwen.ai/Qwen3", "qwen3@example.com",
+        ):
+            with self.subTest(raw=raw):
+                self.assert_code(
+                    "reply_language_mismatch",
+                    lambda: policy.prepare(raw, turn["turn_id"]),
+                )
+                self.assertEqual(policy.snapshot(), before)
+
     def test_request_is_frozen_and_preserves_original_text(self):
         result = self.policy.begin_turn("hello")
         text = "Hello, the value is 1.2."
@@ -427,10 +453,19 @@ class LanguagePolicyTest(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             request.language = "zh"
 
-    def test_numeric_or_punctuation_only_reply_requires_explicit_spoken_words(self):
+    def test_neutral_numeric_reply_preserves_raw_text_and_selected_language(self):
+        for utterance, language in (("hello", "en"), ("你好", "zh")):
+            turn = self.policy.begin_turn(utterance)
+            for reply in ("123", "1.2", "3/4", "2026 10/ 20", "－１２℃"):
+                with self.subTest(utterance=utterance, reply=reply):
+                    request = self.policy.prepare(reply, turn["turn_id"])
+                    self.assertEqual((request.text, request.language), (reply, language))
+                    self.assertEqual(request.turn_id, turn["turn_id"])
+
+    def test_punctuation_and_emoji_only_reply_still_require_spoken_words(self):
         for utterance in ("hello", "你好"):
             turn = self.policy.begin_turn(utterance)
-            for reply in ("123", "1.2", "?!", "🙂", "－１２℃"):
+            for reply in ("?!", "🙂", "－℃", " / "):
                 with self.subTest(utterance=utterance, reply=reply):
                     self.assert_code("ambiguous_reply_language", lambda: self.policy.prepare(
                         reply, turn["turn_id"]
@@ -515,6 +550,136 @@ class LanguagePluginTest(unittest.TestCase):
         self.assertIn("language", properties["action"]["enum"])
         for key in ("instance_id", "turn_id", "input_language", "requested_reply_language"):
             self.assertIn(key, properties)
+
+    def test_language_control_shares_speed_panel_and_uses_display_values(self):
+        tool = self.plugin.get_tools()[0]
+        controls = tool["configSchema"]["properties"]
+        language = controls["reply_language"]
+        self.assertEqual(language["scope"], "shared")
+        self.assertEqual(language["scope"], controls["speed"]["scope"])
+        self.assertEqual(language["title"], "回复语言")
+        self.assertEqual(language["enum"], ["自动", "中文", "English"])
+        self.assertEqual(language["default"], "自动")
+        self.assertEqual(
+            set(tool["inputSchema"]["properties"]["reply_language"]["enum"]),
+            {"auto", "zh", "en", "自动", "中文", "English"},
+        )
+        for label, mode in (("中文", "zh"), ("English", "en"), ("自动", "auto")):
+            self.call("config", reply_language=label)
+            updated = self.plugin.get_tools()[0]["configSchema"]["properties"]["reply_language"]
+            self.assertEqual(updated["default"], label)
+            info = self.call("info")
+            self.assertEqual((info["reply_language"], info["default_reply_language"]), (mode, mode))
+
+    def test_shared_config_saves_without_instance_or_model_load(self):
+        self.plugin._adapter = None
+        result = self.call("config", reply_language="English", speed=0.8, speaker_id=0)
+        self.assertEqual(result["status"], "configured")
+        self.assertEqual(result["reply_language"], "en")
+        self.assertEqual(self.plugin._cfg["reply_language"], "en")
+        self.assertEqual(self.plugin._cfg["speed"], 0.8)
+        self.assertEqual(self.plugin._nodes, {})
+        info = self.call("info", instance_id="not-started")
+        self.assertEqual((info["reply_language"], info["default_reply_language"]), ("en", "en"))
+        self.plugin._ensure_adapter.assert_not_called()
+
+    def test_numeric_user_input_obeys_all_three_shared_preferences(self):
+        self.start()
+        for label, mode, language, source in (
+            ("自动", "auto", "zh", "default"),
+            ("中文", "zh", "zh", "fixed"),
+            ("English", "en", "en", "fixed"),
+        ):
+            with self.subTest(label=label):
+                self.call("config", reply_language=label)
+                self.begin("hello")
+                turn = self.begin("2024 10 20")
+                self.assertEqual(
+                    (turn["reply_language_mode"], turn["reply_language"], turn["language_source"]),
+                    (mode, language, source),
+                )
+                self.assertIsNone(turn["detected_language"])
+
+    def test_shared_language_updates_current_cached_new_and_restarted_instances(self):
+        a = self.start("a", reply_language="中文")
+        b = self.start("b")
+        self.begin("你好", "a")
+        self.begin("hello", "b")
+        self.call("config", instance_id="cached", reply_language="中文")
+        self.call("config", reply_language="English")
+        self.assertIs(self.plugin._nodes["a"], a)
+        self.assertIs(self.plugin._nodes["b"], b)
+        self.assertIsNone(a.policy.snapshot()["turn_id"])
+        self.assertIsNone(b.policy.snapshot()["turn_id"])
+        self.assertEqual(self.call("info", instance_id="cached")["reply_language"], "en")
+        for key in ("cached", "new"):
+            self.start(key)
+        for key in ("a", "b", "cached", "new"):
+            self.assertEqual(self.begin("你好", key)["reply_language"], "en")
+        self.call("stop", instance_id="a")
+        self.assertEqual(self.call("info", instance_id="a")["reply_language"], "en")
+        self.start("a")
+        self.assertEqual(self.begin("你好", "a")["reply_language"], "en")
+        self.call("stop")
+        self.start("after-stop-all")
+        self.assertEqual(self.begin("你好", "after-stop-all")["reply_language"], "en")
+        self.assertEqual(self.call("info")["reply_language"], "en")
+
+    def test_repeated_shared_config_preserves_active_turns_and_queued_speech(self):
+        a, b = self.start("a"), self.start("b")
+        first, second = self.begin("hello", "a"), self.begin("你好", "b")
+        self.call("speak", instance_id="a", text="Hello.", turn_id=first["turn_id"])
+        for label in ("自动", "auto", "自动"):
+            self.call("config", reply_language=label, speed=1.0, speaker_id=0)
+            self.assertEqual(a.policy.snapshot()["turn_id"], first["turn_id"])
+            self.assertEqual(b.policy.snapshot()["turn_id"], second["turn_id"])
+        self.call("speak", instance_id="b", text="你好。", turn_id=second["turn_id"])
+        self.assertEqual(a._text_queue.get_nowait().text, "Hello.")
+        self.assertEqual(b._text_queue.get_nowait().text, "你好。")
+        self.assertEqual(self.adapter.speed_updates, [])
+
+    def test_invalid_shared_config_is_atomic_for_default_and_all_instances(self):
+        a, b = self.start("a"), self.start("b", reply_language="English")
+        self.begin("你好", "a")
+        self.begin("hello", "b")
+        self.call("config", instance_id="cached", reply_language="中文")
+        before = (a.policy.snapshot(), b.policy.snapshot())
+        before_cfg, before_modes = dict(self.plugin._cfg), dict(self.plugin._reply_modes)
+        for fields in (
+            {"reply_language": "fr", "speed": 0.8, "speaker_id": 0},
+            {"reply_language": "中文", "speed": -1, "speaker_id": 0},
+            {"reply_language": "English", "speed": 0.8, "speaker_id": 1},
+            {"reply_language": ["中文"], "speed": 0.8},
+            {"reply_language": "中文", "instance_id": "", "speed": 0.8},
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaises(self.policy_module.LanguagePolicyError):
+                    self.call("config", **fields)
+                self.assertEqual((a.policy.snapshot(), b.policy.snapshot()), before)
+                self.assertEqual(self.plugin._cfg, before_cfg)
+                self.assertEqual(self.plugin._reply_modes, before_modes)
+                self.assertEqual(self.call("info")["reply_language"], "auto")
+                self.assertEqual(self.adapter.speed_updates, [])
+
+    def test_display_and_canonical_values_work_at_start_and_config_boundaries(self):
+        for value, mode in (
+            ("自动", "auto"), ("中文", "zh"), ("English", "en"),
+            ("auto", "auto"), ("zh", "zh"), ("en", "en"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.module.TTSPlugin({"reply_language": value}, Mock()).get_tools()[0]
+                    ["configSchema"]["properties"]["reply_language"]["default"],
+                    {"auto": "自动", "zh": "中文", "en": "English"}[mode],
+                )
+                node = self.start(reply_language=value)
+                self.assertEqual(node.policy.snapshot()["reply_language"], mode)
+                self.call("config", instance_id="a", reply_language=value)
+                self.assertEqual(node.policy.snapshot()["reply_language"], mode)
+                self.assertEqual(self.call("info")["reply_language"], "auto")
+                self.call("config", reply_language=value)
+                self.assertEqual(self.call("info")["reply_language"], mode)
+                self.call("config", reply_language="auto")
 
     def test_dispatch_requested_language_overrides_this_turn_only(self):
         node = self.start(reply_language="zh")
@@ -611,15 +776,449 @@ class LanguagePluginTest(unittest.TestCase):
         ))
         self.assertTrue(node._text_queue.empty())
 
-    def test_raw_numeric_reply_never_reaches_frontend_queue_or_synthesis(self):
+    def test_qwen3_shared_panel_preferences_select_standalone_name_reading(self):
         node = self.start()
-        turn = self.begin("你好")
-        self.assert_code("ambiguous_reply_language", lambda: self.call(
-            "speak", instance_id="a", text="123", turn_id=turn["turn_id"]
+        raw = "Qwen3"
+        for setting, language, frontend_text in (
+            ("中文", "zh", "千问三"),
+            ("English", "en", "Qwen three"),
+            ("自动", "zh", "千问三"),
+        ):
+            with self.subTest(setting=setting):
+                self.call("config", reply_language=setting)
+                turn = self.begin(raw)
+                self.assertEqual(turn["reply_language"], language)
+                response = self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                self.assertEqual(response["status"], "queued")
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language, request.turn_id),
+                                 (raw, language, turn["turn_id"]))
+                self.assertEqual(self.adapter.frontend_inputs[-1], frontend_text)
+                self.assertEqual(tuple(chunk for chunk, _ in request.chunks), (frontend_text,))
+        self.assertEqual(self.adapter.spoken, [])
+
+    def test_standalone_version_name_helper_reads_english_decimal_digits(self):
+        for raw, language, expected in (
+            ("Qwen3", "en", "Qwen three"),
+            ("Qwen3.1", "en", "Qwen three point one"),
+            ("Qwen2.05", "en", "Qwen two point zero five"),
+            ("Qwen2.05", "zh", "千问二点零五"),
+            ("Qwen3 is ready", "en", "Qwen three is ready"),
+            ("Qwen3 is ready", "zh", "Qwen3 is ready"),
+            ("https://qwen.ai/Qwen3", "en", "https://qwen.ai/Qwen3"),
+        ):
+            with self.subTest(raw=raw, language=language):
+                self.assertEqual(
+                    self.module.normalize_standalone_name(raw, language), expected,
+                )
+
+    def test_chinese_name_exception_rejects_english_prose_before_frontend(self):
+        node = self.start(reply_language="zh")
+        turn = self.begin("Qwen3")
+        for raw in ("Qwen3 is ready", "This is Qwen3", "Qwen3x",
+                    "https://qwen.ai/Qwen3", "qwen3@example.com"):
+            with self.subTest(raw=raw):
+                self.assert_code("reply_language_mismatch", lambda: self.call(
+                    "speak", instance_id="a", text=raw, turn_id=turn["turn_id"],
+                ))
+                self.assertTrue(node._text_queue.empty())
+                self.assertEqual(self.adapter.frontend_inputs, [])
+                self.assertEqual(self.adapter.spoken, [])
+
+    def test_version_names_use_local_english_reading_and_preserve_raw_mixed_input(self):
+        node = self.start()
+        for language, raw, frontend_text in (
+            ("zh", "我们使用Qwen3，也使用Qwen2.5。", "我们使用Qwen3，也使用Qwen2.5。"),
+            ("zh", "你好，Qwen3 is ready，然后继续。", "你好，Qwen three is ready，然后继续。"),
+            ("en", "Qwen3 is ready.", "Qwen three is ready."),
+            ("en", "We use Qwen2.05 for this task.", "We use Qwen two point zero five for this task."),
+            ("en", "Compare Qwen3 with Qwen2.05.", "Compare Qwen three with Qwen two point zero five."),
+            ("en", "Qwen3 is ready，欢迎使用。", "Qwen three is ready，欢迎使用。"),
+            ("en", "We use Qwen2.05，然后继续。", "We use Qwen two point zero five，然后继续。"),
+        ):
+            with self.subTest(language=language, raw=raw):
+                self.call("config", reply_language=language)
+                turn = self.begin(raw)
+                self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language), (raw, language))
+                self.assertEqual(self.adapter.frontend_inputs[-1], frontend_text)
+
+    def test_mixed_english_clause_version_reading_is_independent_of_panel_mode(self):
+        node = self.start()
+        raw = "你好，Qwen3 is ready，然后继续。"
+        frontend_text = "你好，Qwen three is ready，然后继续。"
+        for setting, language in (("自动", "zh"), ("中文", "zh"), ("English", "en")):
+            with self.subTest(setting=setting):
+                self.call("config", reply_language=setting)
+                turn = self.begin(raw)
+                self.assertEqual(turn["reply_language"], language)
+                self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language, request.turn_id),
+                                 (raw, language, turn["turn_id"]))
+                self.assertEqual(self.adapter.frontend_inputs[-1], frontend_text)
+                self.assertEqual(tuple(chunk for chunk, _ in request.chunks), (frontend_text,))
+
+    def test_mixed_chinese_name_clauses_keep_existing_chinese_route(self):
+        for language in ("zh", "en"):
+            for raw in (
+                "你好，正在使用Qwen3，然后继续。",
+                "你好，使用Qwen3、Qwen2.05，然后继续。",
+            ):
+                with self.subTest(language=language, raw=raw):
+                    self.assertEqual(self.module.normalize_standalone_name(raw, language), raw)
+
+    def test_mixed_english_name_scope_preserves_quotes_and_version_decimal(self):
+        for language in ("zh", "en"):
+            for raw, expected in (
+                ('你好，"Qwen3 is ready"，然后继续。',
+                 '你好，"Qwen three is ready"，然后继续。'),
+                ("你好，Qwen2.05 is ready，然后继续。",
+                 "你好，Qwen two point zero five is ready，然后继续。"),
+            ):
+                with self.subTest(language=language, raw=raw):
+                    self.assertEqual(self.module.normalize_standalone_name(raw, language), expected)
+
+    def test_mixed_english_name_scope_retains_full_text_identifier_guards(self):
+        for language in ("zh", "en"):
+            for prefix in (
+                'order ID is "Qwen3"',
+                'model_id="Qwen3"',
+                '{"id":"Qwen3"}',
+                "Visit https://example.com/Qwen3",
+                "Email Qwen3@example.com",
+                "We use Qwen3+Coder and Qwen3-8B",
+            ):
+                raw = "你好，" + prefix + ", Qwen3 is ready，然后继续。"
+                expected = "你好，" + prefix + ", Qwen three is ready，然后继续。"
+                with self.subTest(language=language, prefix=prefix):
+                    self.assertEqual(self.module.normalize_standalone_name(raw, language), expected)
+
+    def test_standalone_names_preserve_sentence_final_punctuation_and_raw_text(self):
+        node = self.start()
+        for language in ("zh", "en"):
+            self.call("config", reply_language=language)
+            for name, chinese, english in (
+                ("Qwen", "千问", "Qwen"),
+                ("Qwen3", "千问三", "Qwen three"),
+                ("Qwen2.05", "千问二点零五", "Qwen two point zero five"),
+            ):
+                for punctuation in ".。!?！？":
+                    raw = name + punctuation
+                    expected = (chinese if language == "zh" else english) + punctuation
+                    with self.subTest(language=language, raw=raw):
+                        turn = self.begin(raw)
+                        self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                        request = node._text_queue.get_nowait()
+                        self.assertEqual((request.text, request.language, request.turn_id),
+                                         (raw, language, turn["turn_id"]))
+                        self.assertEqual(self.adapter.frontend_inputs[-1], expected)
+                        self.assertEqual(tuple(chunk for chunk, _ in request.chunks), (expected,))
+
+    def test_english_name_reading_protects_addresses_identifiers_and_extended_models(self):
+        node = self.start(reply_language="en")
+        for raw in (
+            "Visit https://example.com/Qwen3 and https://qwen.ai/Qwen2.05.",
+            "Send mail to Qwen3@example.com.",
+            "The order ID is Qwen3.",
+            "The serial number is Qwen3.",
+            "The order ID for Alice is Qwen3.",
+            "We use Qwen3-8B and Qwen3_foo.",
+            "We use Qwen3/path and Qwen3/XL.",
+            "We use Qwen3.1.2 and Qwen3.1XL and Qwen3.XL.",
+            "We use myQwen3 and Qwen3XL.",
+        ):
+            with self.subTest(raw=raw):
+                turn = self.begin(raw)
+                self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language), (raw, "en"))
+                self.assertEqual(self.adapter.frontend_inputs[-1], raw)
+
+    def test_english_name_reading_keeps_identifier_scope_local(self):
+        node = self.start(reply_language="en")
+        raw = "The order ID is Qwen3, but Qwen3 is ready."
+        turn = self.begin(raw)
+        self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+        request = node._text_queue.get_nowait()
+        self.assertEqual(request.text, raw)
+        self.assertEqual(
+            self.adapter.frontend_inputs[-1],
+            "The order ID is Qwen3, but Qwen three is ready.",
+        )
+
+    def test_english_name_helper_preserves_structured_ids_and_plus_suffix(self):
+        for raw in (
+            "model_id=Qwen3",
+            '{"id":"Qwen3"}',
+            "{'id':'Qwen3'}",
+            "Qwen3+Coder",
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.module.normalize_standalone_name(raw, "en"), raw)
+
+    def test_standalone_name_frontend_output_still_requires_selected_script(self):
+        node = self.start(reply_language="zh")
+        turn = self.begin("Qwen3")
+        self.adapter.normalized_chunks = ("Qwen three",)
+        self.assert_code("frontend_language_mismatch", lambda: self.call(
+            "speak", instance_id="a", text="Qwen3", turn_id=turn["turn_id"],
         ))
-        self.assertEqual(self.adapter.frontend_inputs, [])
+        self.assertEqual(self.adapter.frontend_inputs, ["千问三"])
         self.assertTrue(node._text_queue.empty())
         self.assertEqual(self.adapter.spoken, [])
+
+    def test_exact_numeric_date_uses_all_three_shared_preferences(self):
+        node = self.start()
+        raw = "2026 10/ 20"
+        for mode, language, spoken in (
+            ("auto", "zh", "二零二六年十月二十日"),
+            ("zh", "zh", "二零二六年十月二十日"),
+            ("en", "en", "October twentieth, two thousand twenty-six"),
+        ):
+            with self.subTest(mode=mode):
+                self.call("config", reply_language=mode)
+                turn = self.begin(raw)
+                self.assertEqual(turn["reply_language"], language)
+                result = self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                self.assertEqual(result["status"], "queued")
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language, request.turn_id),
+                                 (raw, language, turn["turn_id"]))
+                self.assertEqual(self.adapter.frontend_inputs[-1], spoken)
+                self.assertEqual(tuple(chunk for chunk, _ in request.chunks), (spoken,))
+                self.assertTrue(node._text_queue.empty())
+        self.assertEqual(self.adapter.spoken, [])
+
+    def test_numeric_quantities_decimals_and_fractions_use_selected_language(self):
+        node = self.start()
+        for raw, chinese, english in (
+            ("123", "一百二十三", "one hundred twenty-three"),
+            ("1.20", "一点二零", "one point two zero"),
+            ("3/4", "四分之三", "three over four"),
+        ):
+            for language, spoken in (("zh", chinese), ("en", english)):
+                with self.subTest(raw=raw, language=language):
+                    self.call("config", reply_language=language)
+                    turn = self.begin(raw)
+                    self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                    request = node._text_queue.get_nowait()
+                    self.assertEqual((request.text, request.language), (raw, language))
+                    self.assertEqual(self.adapter.frontend_inputs[-1], spoken)
+                    self.assertEqual(tuple(chunk for chunk, _ in request.chunks), (spoken,))
+
+    def test_unicode_numeric_forms_preserve_powers_and_fullwidth_temperature(self):
+        node = self.start()
+        for language in ("zh", "en"):
+            self.call("config", reply_language=language)
+            for raw, chinese, english in (
+                ("2²+3³", "二的平方加三的立方", "two squared plus three cubed"),
+                ("－１２℃", "负十二摄氏度", "minus twelve degrees Celsius"),
+            ):
+                with self.subTest(raw=raw, language=language):
+                    spoken = chinese if language == "zh" else english
+                    turn = self.begin(raw)
+                    self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                    request = node._text_queue.get_nowait()
+                    self.assertEqual((request.text, request.language), (raw, language))
+                    self.assertEqual(self.adapter.frontend_inputs[-1], spoken)
+                    self.assertEqual(tuple(chunk for chunk, _ in request.chunks), (spoken,))
+            with self.subTest(raw="1½", language=language):
+                previous_inputs = list(self.adapter.frontend_inputs)
+                turn = self.begin("1½")
+                self.assert_code("frontend_validation_failed", lambda: self.call(
+                    "speak", instance_id="a", text="1½", turn_id=turn["turn_id"],
+                ))
+                self.assertEqual(self.adapter.frontend_inputs, previous_inputs)
+                self.assertTrue(node._text_queue.empty())
+                self.assertEqual(self.adapter.spoken, [])
+
+    def test_numeric_date_accepts_valid_leap_day(self):
+        node = self.start()
+        raw = "2024 02/ 29"
+        for language, spoken in (
+            ("zh", "二零二四年二月二十九日"),
+            ("en", "February twenty ninth, two thousand twenty-four"),
+        ):
+            with self.subTest(language=language):
+                self.call("config", reply_language=language)
+                turn = self.begin(raw)
+                self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                self.assertEqual(request.text, raw)
+                self.assertEqual(self.adapter.frontend_inputs[-1], spoken)
+
+    def test_invalid_numeric_date_is_rejected_before_frontend_and_queue(self):
+        node = self.start()
+        for language in ("zh", "en"):
+            self.call("config", reply_language=language)
+            for raw in ("2026 02/ 30", "2025 02/29", "2026 13/ 20"):
+                with self.subTest(raw=raw, language=language):
+                    turn = self.begin(raw)
+                    self.assert_code("invalid_date", lambda: self.call(
+                        "speak", instance_id="a", text=raw, turn_id=turn["turn_id"],
+                    ))
+                    self.assertEqual(self.adapter.frontend_inputs, [])
+                    self.assertTrue(node._text_queue.empty())
+                    self.assertEqual(self.adapter.spoken, [])
+
+    def test_numeric_dates_preserve_sentence_final_punctuation(self):
+        node = self.start()
+        for language, spoken in (
+            ("zh", "二零二六年十月二十日"),
+            ("en", "October twentieth, two thousand twenty-six"),
+        ):
+            self.call("config", reply_language=language)
+            for date in ("2026 10/ 20", "2026-10-20", "2026/10/20"):
+                for punctuation in ".。!?！？":
+                    raw = date + punctuation
+                    with self.subTest(language=language, raw=raw):
+                        turn = self.begin(raw)
+                        self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                        request = node._text_queue.get_nowait()
+                        self.assertEqual((request.text, request.language, request.turn_id),
+                                         (raw, language, turn["turn_id"]))
+                        normalized = self.adapter.frontend_inputs[-1]
+                        self.assertTrue(normalized.endswith(punctuation))
+                        self.assertEqual(normalized[:-len(punctuation)].rstrip(), spoken)
+                        self.assertEqual(
+                            tuple(chunk for chunk, _ in request.chunks),
+                            (normalized,),
+                        )
+
+    def test_invalid_numeric_dates_with_sentence_final_punctuation_still_reject(self):
+        node = self.start()
+        for language in ("zh", "en"):
+            self.call("config", reply_language=language)
+            for date in ("2026 02/ 30", "2025-02-29", "2026/13/20"):
+                for punctuation in ".。!?！？":
+                    raw = date + punctuation
+                    with self.subTest(language=language, raw=raw):
+                        turn = self.begin(raw)
+                        self.assert_code("invalid_date", lambda: self.call(
+                            "speak", instance_id="a", text=raw, turn_id=turn["turn_id"],
+                        ))
+                        self.assertEqual(self.adapter.frontend_inputs, [])
+                        self.assertTrue(node._text_queue.empty())
+                        self.assertEqual(self.adapter.spoken, [])
+
+    def test_fullwidth_final_period_keeps_date_validation_and_original_punctuation(self):
+        node = self.start()
+        for language, spoken in (
+            ("zh", "二零二六年十月二十日"),
+            ("en", "October twentieth, two thousand twenty-six"),
+        ):
+            self.call("config", reply_language=language)
+            raw = "2026/10/20．"
+            with self.subTest(language=language, raw=raw):
+                normalized = self.module.normalize_neutral_text(raw, language)
+                self.assertTrue(normalized.endswith("．"))
+                self.assertEqual(normalized[:-1].rstrip(), spoken)
+                turn = self.begin(raw)
+                self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language, request.turn_id),
+                                 (raw, language, turn["turn_id"]))
+                self.assertEqual(self.adapter.frontend_inputs[-1], normalized)
+            raw = "2026/02/30．"
+            with self.subTest(language=language, raw=raw):
+                previous_inputs = list(self.adapter.frontend_inputs)
+                turn = self.begin(raw)
+                self.assert_code("invalid_date", lambda: self.call(
+                    "speak", instance_id="a", text=raw, turn_id=turn["turn_id"],
+                ))
+                self.assertEqual(self.adapter.frontend_inputs, previous_inputs)
+                self.assertTrue(node._text_queue.empty())
+
+    def test_fractional_date_day_rejects_without_changing_date_decimal_or_time(self):
+        node = self.start()
+        for language in ("zh", "en"):
+            self.call("config", reply_language=language)
+            raw = "2026/10/20.5"
+            with self.subTest(language=language, raw=raw):
+                previous_inputs = list(self.adapter.frontend_inputs)
+                turn = self.begin(raw)
+                self.assert_code("invalid_date", lambda: self.call(
+                    "speak", instance_id="a", text=raw, turn_id=turn["turn_id"],
+                ))
+                self.assertEqual(self.adapter.frontend_inputs, previous_inputs)
+                self.assertTrue(node._text_queue.empty())
+            for raw, chinese, english in (
+                ("2026/10/20", "二零二六年十月二十日",
+                 "October twentieth, two thousand twenty-six"),
+                ("1.20", "一点二零", "one point two zero"),
+                ("14:25", "十四点二十五分", "fourteen hours twenty-five minutes"),
+            ):
+                with self.subTest(language=language, raw=raw):
+                    expected = chinese if language == "zh" else english
+                    turn = self.begin(raw)
+                    self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                    request = node._text_queue.get_nowait()
+                    self.assertEqual((request.text, request.language), (raw, language))
+                    self.assertEqual(self.adapter.frontend_inputs[-1], expected)
+
+    def test_spaced_numeric_sequence_does_not_become_a_date(self):
+        node = self.start()
+        raw = "2026 10 20"
+        for language in ("zh", "en"):
+            with self.subTest(language=language):
+                self.call("config", reply_language=language)
+                turn = self.begin(raw)
+                self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                spoken = self.adapter.frontend_inputs[-1]
+                self.assertEqual((request.text, request.language), (raw, language))
+                self.assertFalse(any(char.isdecimal() for char in spoken))
+                if language == "zh":
+                    self.assertTrue(any("\u4e00" <= char <= "\u9fff" for char in spoken))
+                    self.assertFalse(any(char in spoken for char in "年月日"))
+                else:
+                    self.assertTrue(any(char.isascii() and char.isalpha() for char in spoken))
+                    self.assertNotIn("October", spoken)
+                    self.assertNotIn("twentieth", spoken)
+
+    def test_ordinary_and_mixed_text_bypass_numeric_normalization(self):
+        node = self.start()
+        with patch.object(self.module, "normalize_neutral_text",
+                          side_effect=AssertionError("Ordinary text must use the existing frontend")) as normalize:
+            for user, raw in (
+                ("你好", "今天是2026年10月20日。"),
+                ("hello", "The value is 1.20."),
+                ("你好", "你好，please wait for 3 minutes."),
+            ):
+                with self.subTest(raw=raw):
+                    turn = self.begin(user)
+                    self.call("speak", instance_id="a", text=raw, turn_id=turn["turn_id"])
+                    request = node._text_queue.get_nowait()
+                    self.assertEqual(request.text, raw)
+                    self.assertEqual(self.adapter.frontend_inputs[-1], raw)
+            normalize.assert_not_called()
+
+    def test_topic_numeric_date_uses_same_normalization_and_preserves_raw_text(self):
+        node = self.start(reply_language="en")
+        raw = "2026 10/ 20"
+        turn = self.begin(raw)
+        node._text_callback(types.SimpleNamespace(data=json.dumps({
+            "text": raw, "turn_id": turn["turn_id"],
+        })))
+        request = node._text_queue.get_nowait()
+        self.assertEqual((request.text, request.language), (raw, "en"))
+        self.assertEqual(self.adapter.frontend_inputs,
+                         ["October twentieth, two thousand twenty-six"])
+        self.assertIsNone(node.policy.snapshot()["last_language_error"])
+
+    def test_punctuation_and_emoji_only_reply_never_reaches_frontend(self):
+        node = self.start()
+        turn = self.begin("你好")
+        for raw in ("?!", "🙂", " / "):
+            with self.subTest(raw=raw):
+                self.assert_code("ambiguous_reply_language", lambda: self.call(
+                    "speak", instance_id="a", text=raw, turn_id=turn["turn_id"],
+                ))
+                self.assertEqual(self.adapter.frontend_inputs, [])
+                self.assertTrue(node._text_queue.empty())
+                self.assertEqual(self.adapter.spoken, [])
 
     def test_frontend_language_switch_rejects_entire_request_before_queue(self):
         node = self.start()
@@ -835,6 +1434,75 @@ class LanguagePluginTest(unittest.TestCase):
         self.assertEqual(engine.calls, baseline_engine.calls)
         self.assertEqual(engine.reset_count, baseline_engine.reset_count)
         self.assertTrue(all(call[3] for call in engine.calls))
+
+    def test_numeric_date_prepared_chunks_reuse_original_adapter_without_renormalizing(self):
+        original = _load_original_adapter()
+        raw = "2026 10/ 20"
+        for language, spoken, pieces in (
+            ("zh", "二零二六年十月二十日", ("二零二六年", "十月二十日")),
+            ("en", "October twentieth, two thousand twenty-six",
+             ("October twentieth,", "two thousand twenty-six")),
+        ):
+            with self.subTest(language=language):
+                chunks = {spoken: (
+                    (pieces[0], ((1, 2, 3), (0, 0, 0), (1, 1, 1))),
+                    (pieces[1], ((8, 9), (2, 2), (1, 1))),
+                )}
+                baseline, baseline_engine, baseline_frontend = _recording_adapter(original, chunks, 0.9)
+                expected = list(baseline.synthesize_stream(spoken))
+                self.adapter, engine, frontend = _recording_adapter(original, chunks, 0.9)
+                self.plugin._adapter = self.adapter
+                self.plugin._ensure_adapter.return_value = self.adapter
+                node = self.start(language, reply_language=language)
+                turn = self.begin(raw, language)
+                self.call("speak", instance_id=language, text=raw, turn_id=turn["turn_id"])
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language), (raw, language))
+                self.assertEqual(tuple(chunk for chunk, _ in request.chunks), pieces)
+                self.assertEqual(frontend, [spoken])
+                # A later turn cannot change a request's already prepared reading.
+                self.begin("hello" if language == "zh" else "你好", language)
+                actual = list(node._adapter.synthesize_stream(request))
+                self.assertEqual(frontend, [spoken], "Synthesis must not repeat numeric TN or G2P")
+                self.assertEqual(baseline_frontend, [spoken])
+                self.assertEqual(actual, expected)
+                self.assertEqual(engine.calls, baseline_engine.calls)
+                self.assertEqual(engine.reset_count, baseline_engine.reset_count)
+                self.assertTrue(all(call[3] for call in engine.calls))
+
+    def test_topic_name_preparation_preserves_raw_text_and_reuses_frozen_chunks(self):
+        original = _load_original_adapter()
+        raw = " \tQwen3\n"
+        for language, frontend_text, spoken in (
+            ("zh", "千问三", "千问三"),
+            ("en", "Qwen three", "Qwen three"),
+        ):
+            with self.subTest(language=language):
+                chunks = {frontend_text: (
+                    (spoken, ((1, 2, 3), (0, 0, 0), (1, 1, 1))),
+                )}
+                self.adapter, engine, frontend = _recording_adapter(original, chunks)
+                self.plugin._adapter = self.adapter
+                self.plugin._ensure_adapter.return_value = self.adapter
+                node = self.start(language, reply_language=language)
+                turn = self.begin(raw, language)
+                node._text_callback(types.SimpleNamespace(data=json.dumps({
+                    "text": raw, "turn_id": turn["turn_id"],
+                })))
+                request = node._text_queue.get_nowait()
+                self.assertEqual((request.text, request.language, request.turn_id),
+                                 (raw, language, turn["turn_id"]))
+                self.assertEqual(frontend, [frontend_text])
+                self.assertIsNone(node.policy.snapshot()["last_language_error"])
+                self.call("config", instance_id=language,
+                          reply_language="en" if language == "zh" else "zh")
+                with self.assertRaises(FrozenInstanceError):
+                    request.chunks = ()
+                audio = list(node._adapter.synthesize_stream(request))
+                self.assertTrue(audio)
+                self.assertEqual(frontend, [frontend_text], "Synthesis must reuse prepared TN/G2P")
+                self.assertEqual(engine.calls[0][0], spoken)
+                self.assertEqual(request.language, language)
 
     def test_prepared_chunks_are_isolated_between_instances_and_turn_changes(self):
         original = _load_original_adapter()

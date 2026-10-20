@@ -13,6 +13,8 @@ import unicodedata
 import uuid
 
 from ..vits2_tts_trt.frontend.mixed_context import context_diagnostics, protected_spans
+from .name_text import normalize_standalone_name
+from .neutral_text import is_neutral_numeric
 
 
 class LanguagePolicyError(ValueError):
@@ -152,9 +154,9 @@ def validate_reply_script(
     Chinese/English mixing is permitted. Complete replies must retain their
     selected primary script; individual frontend chunks can use either script.
     This checks script presence, not whether most words use that language.
-    Neutral chunks may separate meaningful speech, but a wholly numeric reply
-    has no language cue for the unchanged frontend. Require the caller to spell
-    out such a reply in the selected language instead of guessing its reading.
+    Neutral chunks may separate meaningful speech. The language-aware enqueue
+    path can explicitly normalize a numeric reply using its resolved language;
+    normalized complete speech still has to contain the selected primary script.
     """
     scripts = _scripts(text)
     code = "frontend_language_mismatch" if frontend else "reply_language_mismatch"
@@ -258,7 +260,10 @@ class LanguagePolicy:
                 raise LanguagePolicyError(
                     "stale_turn", "A current turn_id from action=language is required"
                 )
-            validate_reply_script(text, self._resolved_language)
+            validate_reply_script(
+                normalize_standalone_name(text, self._resolved_language),
+                self._resolved_language, allow_neutral=is_neutral_numeric(text),
+            )
             return SpeechRequest(text, self._resolved_language, self._turn_id)
 
     def record_error(self, error):
