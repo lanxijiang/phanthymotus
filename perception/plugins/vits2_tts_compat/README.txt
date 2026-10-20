@@ -44,4 +44,18 @@ Darvin submission keeps TTS_PLUGIN=tts and pins the new code commit. Existing
 config.language.yaml deployments should explicitly set
 TTS_PLUGIN=vits2_tts_language when selecting the strict implementation.
 
+Integrated pronunciation resources (2026-10-20):
+  The code bundles fanyi's English Gold lexicon at
+  ../vits2_tts_trt/frontend/en_gold_pronunciations.json.
+  It contains 13,083 entries in 672,106 bytes; only JSON whitespace was compacted.
+  SHA-256: 0c6fd2adb51aeae0fd83968f1902dedb16c73db695a3e3ad088bfc23cc05d57a
+  Both English and mixed G2P use explicit CUSTOM corrections, then Gold, then
+  the runtime CMU dictionary, then G2P fallback. Existing contextual text rules
+  run before pronunciation lookup; full Gold coverage does not override them.
+  Known English words are protected from unwanted FST translation or acronym
+  splitting. OpenMLDB and FeatInsight retain their explicit product readings.
+  Existing date, number, unit, URL/email and language-selection rules remain
+  part of this code release. The runtime archives contain the original base
+  resources; the Gold overlay ships with the plugin and needs no TRT rebuild.
+
 All eight-language MOSS work and non-TTS modules are outside this change.

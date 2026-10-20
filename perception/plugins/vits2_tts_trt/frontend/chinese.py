@@ -253,9 +253,17 @@ def _special_number(value, language):
     return sign + normalize_numbers(value)
 
 
+def _normalize_ordinary_text(text):
+    # Written entities are handled by normalize_special_text first. Preserve
+    # only complete known English words so the FST cannot translate a brand
+    # before the shared English/MIX pronunciation lookup sees it.
+    from .english import normalize_preserving_english_pronunciations
+    return normalize_preserving_english_pronunciations(text, _normalizer.normalize)
+
+
 def _normalize_raw_text(text, lexeme_language="MIX"):
     return normalize_special_text(
-        text, lambda ordinary: _normalizer.normalize(
+        text, lambda ordinary: _normalize_ordinary_text(
             apply_lexeme_rules(ordinary, language=lexeme_language)
         ),
         _special_number,
@@ -285,7 +293,7 @@ def mix_normalize(text: str) -> str:
     if re.search(r"[A-Za-z]", text) and not re.search(r"[\u4e00-\u9fff]", text):
         normalize_original = lambda value: _normalize_raw_text(value, lexeme_language="EN")
     text = normalize_mixed_context(
-        text, normalize_original, _normalizer.normalize, _special_number
+        text, normalize_original, _normalize_ordinary_text, _special_number
     )
     text = normalize_technical_lexemes(_post_replace(text))
     text = en_replace_punct(text)

@@ -80,6 +80,10 @@ _MIXED_READINGS = [
 
 # 5) Camel-case / fused product names that must become two words.
 _FUSED_NAMES = [
+    # Restore the product readings from the integrated 2026-10-14 release.
+    # Underscores belong to identifiers, so do not rewrite embedded names.
+    (re.compile(r"(?<![A-Za-z0-9_])openmldb(?![A-Za-z0-9_])", re.I), "Open M L D B"),
+    (re.compile(r"(?<![A-Za-z0-9_])featinsight(?![A-Za-z0-9_])", re.I), "Feat Insight"),
     (_edge(r"modelhub"), "Model Hub"),
     (_edge(r"phanthymotus"), "Phanthy Motus"),
     (_edge(r"phanthymovie"), "Phanthy Movie"),

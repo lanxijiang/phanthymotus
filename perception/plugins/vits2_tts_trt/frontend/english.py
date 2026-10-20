@@ -1,6 +1,8 @@
 import pickle
 import os
 import re
+import json
+from functools import lru_cache
 import inflect
 import numpy as np
 
@@ -215,8 +217,30 @@ KNOWN_ACRONYMS = {
 
 
 def _split_acronym(m):
-    """Split consecutive uppercase letters with spaces: GPT → G P T."""
+    """Keep a known pronunciation; spell unknown uppercase acronyms."""
+    word = m.group(0)
+    if word in CUSTOM_EN_PRONUNCIATIONS or word in gold_en_pronunciations():
+        return word
     return " ".join(m.group(0))
+
+
+def _split_unknown_acronyms(text):
+    """Keep complete Gold words, including hyphens and apostrophes, intact."""
+    gold = gold_en_pronunciations()
+    protected = [
+        match.span()
+        for match in _EN_LEXICON_WORD_RE.finditer(text)
+        if (match.group().upper() in CUSTOM_EN_PRONUNCIATIONS
+            or match.group().upper() in gold)
+    ]
+
+    def replace(match):
+        if any(start <= match.start() and match.end() <= end
+               for start, end in protected):
+            return match.group()
+        return _split_acronym(match)
+
+    return ACRONYM_SPLIT_RE.sub(replace, text)
 
 
 def text_normalize(text):
@@ -225,7 +249,7 @@ def text_normalize(text):
     for name, replacement in KNOWN_ACRONYMS.items():
         text = re.sub(rf"\b{re.escape(name)}\b", replacement, text, flags=re.I)
     # Split acronyms before normalization so G2P reads them letter-by-letter
-    text = ACRONYM_SPLIT_RE.sub(_split_acronym, text)
+    text = _split_unknown_acronyms(text)
     text = normalize_numbers(text)
     text = expand_abbreviations(text)
     text = replace_punctuation(text)
@@ -240,7 +264,7 @@ def text_normalize_without_numbers(text):
     text = normalize_technical_lexemes(text)
     for name, replacement in KNOWN_ACRONYMS.items():
         text = re.sub(rf"\b{re.escape(name)}\b", replacement, text, flags=re.I)
-    text = ACRONYM_SPLIT_RE.sub(_split_acronym, text)
+    text = _split_unknown_acronyms(text)
     text = expand_abbreviations(text)
     text = replace_punctuation(text)
     text = PUNCT_SPACE_RE.sub(r"\1 \2", text)
@@ -314,15 +338,78 @@ CUSTOM_EN_PRONUNCIATIONS = {
 }
 
 
+@lru_cache(maxsize=1)
+def gold_en_pronunciations():
+    """Load fanyi's verified ARPAbet overlay once for English and MIX G2P."""
+    path = os.path.join(current_file_path, "en_gold_pronunciations.json")
+    with open(path, encoding="utf-8") as source:
+        entries = json.load(source)
+    if not isinstance(entries, dict):
+        raise ValueError("English gold lexicon must be a word-to-ARPAbet mapping")
+    result = {}
+    for word, phones in entries.items():
+        if (not isinstance(word, str) or not word or word != word.upper()
+                or not isinstance(phones, list) or not phones
+                or any(not isinstance(phone, str) or phone not in arpa for phone in phones)):
+            raise ValueError(f"Invalid English gold pronunciation: {word!r}")
+        result[word] = tuple(phones)
+    return result
+
+
+def english_pronunciation(token):
+    """Return syllables using explicit corrections, then Gold, then CMU."""
+    word = token.upper()
+    if word in CUSTOM_EN_PRONUNCIATIONS:
+        return CUSTOM_EN_PRONUNCIATIONS[word]
+    phones = gold_en_pronunciations().get(word)
+    if phones is not None:
+        return (phones,)
+    return eng_dict.get(word)
+
+
+_EN_LEXICON_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]*(?:['.-][A-Za-z0-9_]+)*(?![A-Za-z0-9_])"
+)
+_EN_TN_CONTEXT_WORDS = frozenset({
+    "USD", "EUR", "GBP", "CNY", "RMB", "DR", "MR", "MRS", "MS", "ST",
+})
+
+
+def normalize_preserving_english_pronunciations(text, normalize_plain):
+    """Preserve complete known words through TN, without rewriting numbers.
+
+    Called only on ordinary spans after the existing address, number, unit and
+    identifier handlers. Explicit lexeme rewrites retain priority. Versioned
+    model names are deliberately not split here: their digits and surrounding
+    context remain owned by the existing frontend.
+    """
+    gold = gold_en_pronunciations()
+    protected = []
+    for match in _EN_LEXICON_WORD_RE.finditer(text):
+        word = match.group().upper()
+        if (len(word) >= 3 and word not in _EN_TN_CONTEXT_WORDS
+                and (word in CUSTOM_EN_PRONUNCIATIONS or word in gold)):
+            protected.append(match)
+    if not protected:
+        return normalize_plain(text)
+    output, cursor = [], 0
+    for match in protected:
+        if cursor < match.start():
+            output.append(normalize_plain(text[cursor:match.start()]))
+        output.append(match.group())
+        cursor = match.end()
+    if cursor < len(text):
+        output.append(normalize_plain(text[cursor:]))
+    return " ".join(part.strip() for part in output if part.strip())
+
+
 def g2p_token(token):
     if token in punctuation:
         return (token,), (0,)
     # Uppercase A is a spelled letter (for example, OA), not the article "a".
     if token == "A":
         return ("ey",), (2,)
-    syllables = CUSTOM_EN_PRONUNCIATIONS.get(
-        token.upper(), eng_dict.get(token.upper())
-    )
+    syllables = english_pronunciation(token)
     if syllables is not None:
         phns, tns = refine_syllables(syllables)
         return tuple(post_replace_ph(i) for i in phns), tuple(tns)

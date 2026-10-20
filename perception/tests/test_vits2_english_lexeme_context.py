@@ -21,7 +21,8 @@ class EnglishLexemeContextTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = Path(__file__).resolve().parents[1] / "plugins/vits2_tts_trt/frontend/chinese.py"
-        selected = {"_remove_redundant_newlines_after_punctuation", "_normalize_raw_text", "mix_normalize"}
+        selected = {"_remove_redundant_newlines_after_punctuation",
+                    "_normalize_ordinary_text", "_normalize_raw_text", "mix_normalize"}
         tree = ast.parse(source.read_text(encoding="utf-8"))
         functions = ast.Module(body=[node for node in tree.body
                                      if isinstance(node, ast.FunctionDef) and node.name in selected],
@@ -37,11 +38,20 @@ class EnglishLexemeContextTest(unittest.TestCase):
         }
         exec(compile(functions, str(source), "exec"), cls.entry)
 
-    def normalize(self, text):
+    def setUp(self):
         english = types.ModuleType("plugins.vits2_tts_trt.frontend.english")
         english.replace_punctuation = lambda value: value
-        with patch.dict(sys.modules, {english.__name__: english}):
-            return self.entry["mix_normalize"](text)
+        # These tests isolate context routing with an identity FST. The real
+        # Gold protection/lookup is exercised in test_vits2_gold_lexicon.py.
+        english.normalize_preserving_english_pronunciations = (
+            lambda value, normalize_plain: normalize_plain(value)
+        )
+        boundary = patch.dict(sys.modules, {english.__name__: english})
+        boundary.start()
+        self.addCleanup(boundary.stop)
+
+    def normalize(self, text):
+        return self.entry["mix_normalize"](text)
 
     def test_pure_english_names_are_not_translated_to_chinese(self):
         for text in ("We saw Qwen at WAIC.", "Qwen is ready.", "Qwen", "qwen"):
