@@ -52,6 +52,16 @@ class TTSPlugin(LanguageTTSPlugin):
     def dispatch(self, name, args):
         action = args.get("action") if name == "tts" else name
         with self._instances_lock:
+            if action == "config" and not (args.keys() - {"action", "instance_id"}):
+                # Standard clients may initialize with no optional settings.
+                # Keep current defaults, nodes and turns; do not load the model.
+                # Unknown or explicitly supplied settings retain normal validation.
+                return {
+                    "status": "configured",
+                    "speed": float(self._cfg.get("speed", 1.0)),
+                    "speaker_id": int(self._cfg.get("speaker_id", 0)),
+                }
+
             if action == "language":
                 node = self._node(args)
                 with node.policy.lock:
