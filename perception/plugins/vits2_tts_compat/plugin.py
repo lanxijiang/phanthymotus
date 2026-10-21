@@ -51,6 +51,14 @@ class TTSPlugin(LanguageTTSPlugin):
 
     def dispatch(self, name, args):
         action = args.get("action") if name == "tts" else name
+        if action == "config":
+            # Darvin sends blank remote-service fields even for a local backend.
+            # Treat only these known empty strings as absent; preserve supplied
+            # settings for normal validation and leave the caller's dict intact.
+            args = {
+                key: value for key, value in args.items()
+                if not (key in {"api_key", "model", "voice", "url"} and value == "")
+            }
         with self._instances_lock:
             if action == "config" and not (args.keys() - {"action", "instance_id"}):
                 # Standard clients may initialize with no optional settings.

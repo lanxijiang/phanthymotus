@@ -146,7 +146,32 @@ class StandardCompatibilityTest(unittest.TestCase):
                 self.assertNotIn(instance, self.plugin._nodes)
                 self.assertNotIn(instance, self.plugin._reply_modes)
 
+    def test_darvin_legacy_empty_fields_start_speak_stop_sequence(self):
+        # Actual platform config shape: these four optional remote-service
+        # settings are present even when the local TensorRT backend is used.
+        legacy = {"api_key": "", "model": "", "voice": "", "url": ""}
+        for instance in ("tts_eval_shared", "second", "third"):
+            with self.subTest(instance=instance):
+                args = {"action": "config", "instance_id": instance, **legacy}
+                original = dict(args)
+                with patch.object(self.plugin, "_ensure_adapter") as ensure:
+                    self.assertEqual(self.plugin.dispatch("tts", args), {
+                        "status": "configured", "speed": 1.0, "speaker_id": 0,
+                    })
+                    ensure.assert_not_called()
+                self.assertEqual(args, original)
+                node = self.start(instance)
+                for text, language in (("你好。", "zh"), ("Hello.", "en")):
+                    result = self.call("speak", instance_id=instance, text=text)
+                    request = node._text_queue.get_nowait()
+                    self.assertEqual(result["status"], "queued")
+                    self.assertEqual((request.text, request.language), (text, language))
+                self.call("stop", instance_id=instance)
+                self.assertNotIn(instance, self.plugin._nodes)
+                self.assertNotIn(instance, self.plugin._reply_modes)
+
     def test_empty_config_preserves_three_instance_dialogue_turns_and_queues(self):
+        self.call("config", speed=0.9, reply_language="English")
         nodes = {}
         snapshots = {}
         turns = {}
@@ -159,12 +184,22 @@ class StandardCompatibilityTest(unittest.TestCase):
             self.call("speak", instance_id=instance, text=text, turn_id=turn["turn_id"])
             snapshots[instance] = node.policy.snapshot()
         cfg, modes = dict(self.plugin._cfg), dict(self.plugin._reply_modes)
+        default_language = self.plugin._default_reply_language
         updates = list(self.adapter.speed_updates)
         self.plugin._ensure_adapter.reset_mock()
         for instance in (None, "a", "b", "c", "not_started"):
             fields = {} if instance is None else {"instance_id": instance}
-            self.assertEqual(self.call("config", **fields)["status"], "configured")
+            for legacy in ({}, {"api_key": "", "model": "", "voice": "", "url": ""}):
+                for name, action in (("tts", {"action": "config"}), ("config", {})):
+                    with self.subTest(instance=instance, name=name, legacy=bool(legacy)):
+                        args = {**action, **fields, **legacy}
+                        original = dict(args)
+                        self.assertEqual(self.plugin.dispatch(name, args), {
+                            "status": "configured", "speed": 0.9, "speaker_id": 0,
+                        })
+                        self.assertEqual(args, original)
         self.assertEqual(self.plugin._cfg, cfg)
+        self.assertEqual(self.plugin._default_reply_language, default_language)
         self.assertEqual(self.plugin._reply_modes, modes)
         self.assertEqual(set(self.plugin._nodes), set(nodes))
         self.assertEqual(self.adapter.speed_updates, updates)
@@ -195,15 +230,66 @@ class StandardCompatibilityTest(unittest.TestCase):
             ({"speaker_id": 1}, "invalid_speaker"),
             ({"reply_language": "fr"}, "invalid_reply_language"),
         ):
+            for legacy in ({}, {"api_key": "", "model": "", "voice": "", "url": ""}):
+                with self.subTest(fields=fields, legacy=bool(legacy)):
+                    args = {"action": "config", "instance_id": "tts_eval_shared",
+                            **legacy, **fields}
+                    original = dict(args)
+                    self.assert_code(code, lambda: self.plugin.dispatch("tts", args))
+                    self.assertEqual(args, original)
+                    self.assertEqual(self.plugin._cfg, cfg)
+                    self.assertEqual(self.plugin._nodes, {})
+                    self.assertEqual(self.plugin._reply_modes, {})
+        self.assertEqual(self.adapter.speed_updates, [])
+        self.plugin._ensure_adapter.assert_not_called()
+
+    def test_legacy_config_filter_accepts_only_known_empty_strings(self):
+        legacy = {"api_key": "", "model": "", "voice": "", "url": ""}
+        cfg = dict(self.plugin._cfg)
+        variants = [{**legacy, "unknown": ""}]
+        for key in legacy:
+            variants.extend({**legacy, key: value}
+                            for value in (None, "configured-value", " ", 0, False, [], {}))
+        for fields in variants:
             with self.subTest(fields=fields):
-                self.assert_code(code, lambda: self.call(
-                    "config", instance_id="tts_eval_shared", **fields,
-                ))
+                args = {"action": "config", "instance_id": "tts_eval_shared", **fields}
+                original = dict(args)
+                self.assert_code("empty_config", lambda: self.plugin.dispatch("tts", args))
+                self.assertEqual(args, original)
                 self.assertEqual(self.plugin._cfg, cfg)
                 self.assertEqual(self.plugin._nodes, {})
                 self.assertEqual(self.plugin._reply_modes, {})
         self.assertEqual(self.adapter.speed_updates, [])
         self.plugin._ensure_adapter.assert_not_called()
+
+    def test_legacy_empty_fields_preserve_valid_speed_and_language_settings(self):
+        legacy = {"api_key": "", "model": "", "voice": "", "url": ""}
+        args = {"action": "config", **legacy,
+                "speed": 0.9, "speaker_id": 0, "reply_language": "English"}
+        original = dict(args)
+        result = self.plugin.dispatch("tts", args)
+        self.assertEqual(args, original)
+        self.assertEqual((result["status"], result["speed"], result["reply_language"]),
+                         ("configured", 0.9, "en"))
+        self.assertEqual(self.plugin._default_reply_language, "en")
+        self.plugin._ensure_adapter.assert_not_called()
+        node = self.start("a")
+        self.call("speak", instance_id="a", text="Hello.")
+        self.assertEqual(node._text_queue.get_nowait().language, "en")
+
+        args = {"action": "config", "instance_id": "a", **legacy,
+                "speed": 1.1, "speaker_id": 0, "reply_language": "中文"}
+        original = dict(args)
+        result = self.plugin.dispatch("tts", args)
+        self.assertEqual(args, original)
+        self.assertEqual((result["status"], result["speed"], result["reply_language"]),
+                         ("configured", 1.1, "zh"))
+        self.assertEqual(self.plugin._default_reply_language, "en")
+        self.assertIs(self.plugin._nodes["a"], node)
+        self.assertEqual(node.state, "running")
+        self.call("speak", instance_id="a", text="你好。")
+        self.assertEqual(node._text_queue.get_nowait().language, "zh")
+        self.assertEqual(self.adapter.speed_updates, [0.9, 1.1])
 
     def test_start_then_speak_needs_no_language_call_and_uses_current_text(self):
         node = self.start()
