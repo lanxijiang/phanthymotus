@@ -81,7 +81,7 @@ plugins:
     # voice moves with `language` and cannot end up mismatched with it. The global
     # ids are not guessable (Japanese starts at 37, Spanish is 28, 29 and 53), which
     # is why they are not what this field takes.
-    speaker_id: 0
+    speaker_id: 2  # Original zh_5 / Weiguo reference in the existing pinned archive.
     speed: 1.0
     warmup: true
     max_chunk_tokens: 256

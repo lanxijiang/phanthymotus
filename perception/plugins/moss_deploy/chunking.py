@@ -7,10 +7,13 @@ author's 75-token splitter is used unchanged whenever it chooses safe cuts.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 
 
 _THAI = re.compile(r"[\u0e00-\u0e7f]")
+_THAI_RUN = re.compile(r"[\u0e00-\u0e7f]+")
+_CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]")
 _NUMBER_UNIT = re.compile(r"(?<![0-9.])\d+(?:[.,]\d+)?\s*[A-Za-zµμ°]+(?:/[A-Za-zµμ°]+)*\b")
 _SAFE_SEPARATORS = re.compile(r"\s+|[。！？!?；;，,、]+")
 
@@ -55,6 +58,65 @@ def _safe_cuts(text: str) -> list[int]:
     return sorted(set(cuts)) + [len(text)]
 
 
+def _non_whitespace(parts: list[str]) -> str:
+    return "".join(character for part in parts for character in part if not character.isspace())
+
+
+def _author_prepared_text(text: str) -> str:
+    # The author's multi-chunk preparation can capitalize the initial Latin
+    # letter and append one terminal stop. Admit only those known additions.
+    prepared = text
+    if _CJK.search(text):
+        if prepared[-1] not in ".!?。！？；;":
+            prepared += "。"
+    else:
+        if prepared[0].islower():
+            prepared = prepared[0].upper() + prepared[1:]
+        if prepared[-1].isalnum():
+            prepared += "."
+    return prepared
+
+
+def _author_text_preserved(text: str, chunks: list[str]) -> bool:
+    spoken = _non_whitespace(chunks)
+    return spoken == _non_whitespace([text]) or (
+        len(chunks) > 1 and spoken == _non_whitespace([_author_prepared_text(text)])
+    )
+
+
+def _latin_word_character(character: str) -> bool:
+    return character.isdigit() or unicodedata.name(character, "").startswith("LATIN ")
+
+
+def _latin_spacing_preserved(text: str, chunks: list[str]) -> bool:
+    # Across chunk boundaries the author's splitter may remove or insert a
+    # space. Inside one chunk, retain whether adjacent Latin word characters
+    # were separated: compacting only non-whitespace characters misses both
+    # "We are" -> "Weare" and "Weare" -> "We are".
+    expected = text if _non_whitespace(chunks) == _non_whitespace([text]) else _author_prepared_text(text)
+    source_positions = [index for index, char in enumerate(expected) if not char.isspace()]
+    offset = 0
+    for chunk in chunks:
+        chunk_positions = [index for index, char in enumerate(chunk) if not char.isspace()]
+        for index in range(len(chunk_positions) - 1):
+            left = source_positions[offset + index]
+            right = source_positions[offset + index + 1]
+            if _latin_word_character(expected[left]) and _latin_word_character(expected[right]):
+                source_space = right > left + 1
+                chunk_space = chunk_positions[index + 1] > chunk_positions[index] + 1
+                if source_space != chunk_space:
+                    return False
+        offset += len(chunk_positions)
+    return True
+
+
+def _protected_runs(parts: list[str]) -> tuple[list[str], list[str]]:
+    return (
+        sorted(match.group() for part in parts for match in _THAI_RUN.finditer(part)),
+        sorted(match.group() for part in parts for match in _NUMBER_UNIT.finditer(part)),
+    )
+
+
 def split_preserving_boundaries(
     text: str,
     max_tokens: int,
@@ -72,14 +134,27 @@ def split_preserving_boundaries(
     text = str(text or "").strip()
     if not text:
         return []
+    if text_capacity < 1:
+        raise ValueError("Global prefill profile has no capacity for text")
     original = original_split(text, max_tokens)
-    if not original:
-        return []
+    # The original splitter may normalize spaces and add its known terminal
+    # punctuation, but losing, duplicating or reordering spoken characters
+    # would silently change speech.
+    # A nonempty input must also never turn into an empty successful request.
+    invalid_original = (
+        not original
+        or any(not isinstance(chunk, str) or not chunk.strip() for chunk in original)
+        or not _author_text_preserved(text, original)
+        or not _latin_spacing_preserved(text, original)
+        or _protected_runs(original) != _protected_runs([text])
+        or any(count_tokens(chunk) > text_capacity for chunk in original)
+    )
     position = 0
-    unsafe = False
-    for left, right in zip(original, original[1:]):
-        risk, position = _risky_boundary(text, left, right, position)
-        unsafe |= risk
+    unsafe = invalid_original
+    if not invalid_original:
+        for left, right in zip(original, original[1:]):
+            risk, position = _risky_boundary(text, left, right, position)
+            unsafe |= risk
     if not unsafe:
         return original
     if count_tokens(text) <= text_capacity:

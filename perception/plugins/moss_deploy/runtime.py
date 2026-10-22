@@ -14,6 +14,7 @@ import sentencepiece as spm
 
 from .assets import load_original_prompting, load_original_source
 from .chunking import prompt_text_capacity, split_preserving_boundaries
+from .completeness import validate_chunk_result
 from .si_units import prepare_with_si_unit_guard
 from .pool import SessionAdapter, SharedGraphPool
 from .selected_logits import SelectedAudioScores, wrap_selected_outputs
@@ -360,6 +361,7 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 pause = self.estimate_voice_clone_inter_chunk_pause_seconds(self._previous_stream_chunk_text)
                 self._request_audio_callback(np.zeros((round(48000 * pause), 2), dtype=np.float32))
             result = super().synthesize_single_chunk(text=text, prompt_audio_codes=prompt_audio_codes, streaming=streaming)
+            validate_chunk_result(result, self.manifest["generation_defaults"])
             self._previous_stream_chunk_text = text
             return result
 

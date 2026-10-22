@@ -16,12 +16,19 @@ Example:
 Language/speaker configuration is shared by a server: use a dedicated idle
 endpoint. This tool never launches containers, stops other instances, or uses
 /tts/test. Each request owns a random instance/topic and cleans up only it.
+--reuse-topic retains one private instance/topic across start/speak/stop cycles.
+--discovery-mode immediate skips the discovery wait; delayed subscribes to
+audio after speak, while the diagnostic subscription remains active.
+--no-save-audio retains timing/integrity evidence without writing WAV files.
+--allow-legacy-perf-metadata explicitly permits older successful perf spans
+without any PCM byte/hash fields; those integrity checks remain unavailable.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -80,7 +87,7 @@ class McpClient:
 
 class RosReceiver:
     """Subscribe before speak; callback timestamps include transport latency."""
-    def __init__(self, topic, domain_id):
+    def __init__(self, topic, domain_id, *, subscribe_audio=True):
         os.environ["ROS_DOMAIN_ID"] = str(domain_id)
         import rclpy
         from rclpy.context import Context
@@ -109,12 +116,21 @@ class RosReceiver:
                 return  # Other services may also use the shared diagnostic topic.
             self.events.put({"kind": "perf", "received_monotonic_s": time.perf_counter(), "data": value})
 
-        self.audio_sub = self.node.create_subscription(AudioChunk, topic, audio, qos)
+        self._audio_type, self._audio_callback, self._audio_qos = AudioChunk, audio, qos
+        self.audio_sub = None
+        if subscribe_audio:
+            self.subscribe_audio()
         self.perf_sub = self.node.create_subscription(String, "/perception/perf_spans", perf, qos)
         self.executor = SingleThreadedExecutor(context=self.context)
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self._spin, daemon=True, name="moss-smoke-dds")
         self.thread.start()
+
+    def subscribe_audio(self):
+        if self.audio_sub is not None:
+            raise RuntimeError("Audio subscription already exists")
+        self.audio_sub = self.node.create_subscription(
+            self._audio_type, self.topic, self._audio_callback, self._audio_qos)
 
     def _spin(self):
         try:
@@ -151,8 +167,9 @@ class RosReceiver:
 
 
 class AudioEvidence:
-    def __init__(self, started, trace_id):
+    def __init__(self, started, trace_id, *, allow_legacy_perf_metadata=False):
         self.started, self.trace_id = started, trace_id
+        self.allow_legacy_perf_metadata = allow_legacy_perf_metadata
         self.pcm, self.frames, self.spans = bytearray(), [], {}
         self.eof_received = None
         self.eof_stamp = None
@@ -188,7 +205,8 @@ class AudioEvidence:
         if self.first_nonzero is None and any(payload):
             self.first_nonzero = received
         self.pcm.extend(payload)
-        self.frames.append({"bytes": len(payload), "received_monotonic_s": received, "stamp": event["stamp"]})
+        self.frames.append({"bytes": len(payload), "received_monotonic_s": received,
+                            "stamp": event["stamp"], "sha256": hashlib.sha256(payload).hexdigest()})
 
     def _merged_short_span(self):
         # _TTSNode._worker publishes only its merged tts_generate span when
@@ -211,20 +229,46 @@ class AudioEvidence:
         counted = played if played is not None else generated
         if counted.get("meta", {}).get("frames") != len(self.frames):
             raise ValueError("DDS frame count differs from successful publisher count; possible packet loss")
+        metadata = counted.get("meta", {})
+        pcm_sha256 = hashlib.sha256(self.pcm).hexdigest()
+        expected_pcm = {"pcm_bytes": len(self.pcm), "pcm_sha256": pcm_sha256,
+                        "generated_pcm_bytes": len(self.pcm), "generated_pcm_sha256": pcm_sha256}
+        successful_spans = (generated, played) if played is not None else (generated,)
+        metadata_rows = [span.get("meta", {}) for span in successful_spans]
+        legacy_metadata = self.allow_legacy_perf_metadata and not any(
+            field in row for row in metadata_rows for field in expected_pcm)
+        pcm_checks_match = None if legacy_metadata else True
+        if not legacy_metadata:
+            # Every field remains mandatory in the counted publisher span.
+            # Present values in either successful span must also agree; a
+            # partial schema or a null value is never a legacy exemption.
+            for field, expected in expected_pcm.items():
+                values = [metadata.get(field)] + [row[field] for row in metadata_rows if field in row]
+                if any(type(value) is not type(expected) or value != expected for value in values):
+                    message = ("Generated PCM bytes/hash differ from published/received PCM or are missing"
+                               if field.startswith("generated_") else
+                               "DDS PCM bytes/hash differ from successful publisher evidence or are missing")
+                    raise ValueError(message)
         for span in ((generated, played) if played is not None else (generated,)):
             if not isinstance(span.get("start_ts"), (int, float)) or not isinstance(span.get("end_ts"), (int, float)) or span["end_ts"] < span["start_ts"]:
                 raise ValueError("Invalid successful perf-span timestamps")
         first = self.frames[0]["received_monotonic_s"]
+        last_elapsed = self.frames[-1]["received_monotonic_s"] - self.started
         elapsed = self.eof_received - self.started
         duration = len(self.pcm) / BYTES_PER_SECOND
         return {"first_pcm_s": first - self.started, "first_nonzero_pcm_chunk_s": self.first_nonzero - self.started,
+                "last_pcm_s": last_elapsed, "rtf_last_pcm": last_elapsed / duration,
                 "elapsed_to_eof_s": elapsed, "audio_s": duration, "rtf": elapsed / duration,
+                "rtf_to_eof": elapsed / duration,
                 "pcm_bytes": len(self.pcm), "chunks": len(self.frames), "sample_rate": 16000,
                 "channels": 1, "sample_width_bytes": 2, "format": PCM_FORMAT,
                 "nonempty_nonzero_pcm": True, "eof_received": True, "publisher_frames_match": True,
+                "publisher_pcm_bytes_match": pcm_checks_match, "publisher_pcm_sha256_match": pcm_checks_match,
+                "generated_pcm_bytes_match": pcm_checks_match, "generated_pcm_sha256_match": pcm_checks_match,
+                "pcm_integrity_metadata": "unavailable" if legacy_metadata else "verified",
                 "perf_span_mode": "separate_generation_and_playback" if played is not None else "merged_short_audio",
                 "started_monotonic_s": self.started, "ended_monotonic_s": self.eof_received,
-                "pcm_sha256": hashlib.sha256(self.pcm).hexdigest(), "frames": self.frames,
+                "pcm_sha256": pcm_sha256, "frames": self.frames,
                 "eof_stamp": self.eof_stamp, "successful_perf_spans": self.spans,
                 "max_receive_gap_s": max((b["received_monotonic_s"] - a["received_monotonic_s"]
                                            for a, b in zip(self.frames, self.frames[1:])), default=0)}
@@ -268,13 +312,19 @@ def wait_idle(client, timeout):
 
 
 def run_case(client, args, case, index, *, receiver_factory=RosReceiver):
-    identifier = "moss_smoke_" + uuid.uuid4().hex
+    if getattr(args, "reuse_topic", False):
+        if not getattr(args, "_shared_instance_id", None):
+            args._shared_instance_id = "moss_smoke_" + uuid.uuid4().hex
+        identifier = args._shared_instance_id
+    else:
+        identifier = "moss_smoke_" + uuid.uuid4().hex
     topic = f"{args.topic_prefix.rstrip('/')}/{identifier}"
-    trace_id = identifier + "_trace"
+    trace_id = identifier + "_trace_" + uuid.uuid4().hex
+    discovery_mode = getattr(args, "discovery_mode", "ready")
     row = {"index": index, "case_id": case.get("id", str(index)), "text": case["text"],
            "language": case.get("language"), "speaker_id": case.get("speaker_id"),
            "instance_id": identifier, "topic_in": topic, "topic_out": topic + "/tts",
-           "trace_id": trace_id, "ok": False}
+           "trace_id": trace_id, "discovery_mode": discovery_mode, "ok": False}
     receiver, owned, evidence = None, False, None
     try:
         row["info_before"] = wait_idle(client, args.ready_timeout)
@@ -288,7 +338,9 @@ def run_case(client, args, case, index, *, receiver_factory=RosReceiver):
             if row["config"].get("state") == "error":
                 raise RuntimeError(f"TTS configuration failed: {row['config']}")
             row["info_after_config"] = wait_idle(client, args.ready_timeout)
-        receiver = receiver_factory(topic + "/tts", args.ros_domain_id)
+        if discovery_mode != "immediate":
+            receiver_options = {"subscribe_audio": False} if discovery_mode == "delayed" else {}
+            receiver = receiver_factory(topic + "/tts", args.ros_domain_id, **receiver_options)
         began = time.perf_counter()
         owned = True  # Own random ID even if start fails after creating its node.
         row["start"] = client.call("start", input_topic=topic, instance_id=identifier)
@@ -299,14 +351,26 @@ def run_case(client, args, case, index, *, receiver_factory=RosReceiver):
         advertised = [{"topic": item.get("topic"), "format": item.get("format")} for item in row["start"].get("topic_out", [])]
         if advertised != expected_out:
             raise RuntimeError(f"TTS start advertised unexpected output topics: {advertised}")
-        row["subscriber_ready"] = receiver.wait_ready(args.discovery_timeout)
+        if discovery_mode == "immediate":
+            # Do not create a subscriber before start's dry-run: that would
+            # give DDS unmeasured discovery time even without wait_ready().
+            receiver = receiver_factory(topic + "/tts", args.ros_domain_id)
+        if discovery_mode == "ready":
+            row["subscriber_ready"] = receiver.wait_ready(args.discovery_timeout)
         started = time.perf_counter()
         row["started_wall_unix_s"] = time.time()
-        evidence = AudioEvidence(started, trace_id)
+        evidence = AudioEvidence(started, trace_id,
+                                 allow_legacy_perf_metadata=getattr(args, "allow_legacy_perf_metadata", False))
         row["speak"] = client.call("speak", text=case["text"], instance_id=identifier, _trace_id=trace_id)
         row["speak_rpc_seconds"] = time.perf_counter() - started
         if row["speak"].get("status") != "queued" or not row["speak"].get("action_id"):
             raise RuntimeError(f"TTS speak was not queued: {row['speak']}")
+        if discovery_mode == "delayed":
+            delay = getattr(args, "subscriber_delay_s", .8)
+            time.sleep(max(0., started + delay - time.perf_counter()))
+            receiver.subscribe_audio()
+            row["subscriber_delay_requested_s"] = delay
+            row["audio_subscription_created_s"] = time.perf_counter() - started
         row.update(collect(receiver, evidence, args.ttft_timeout, args.completion_timeout, args.perf_timeout))
         row["ttft_pass"] = row["first_pcm_s"] <= args.max_ttft
         row["rtf_pass"] = row["rtf"] <= args.max_rtf
@@ -316,12 +380,17 @@ def run_case(client, args, case, index, *, receiver_factory=RosReceiver):
         row.update(error=f"{type(error).__name__}: {error}", traceback=traceback.format_exc())
     finally:
         if evidence is not None and evidence.pcm:
-            path = args.output / f"case-{index:03d}.wav"
-            with wave.open(str(path), "wb") as destination:
-                destination.setnchannels(1); destination.setsampwidth(2); destination.setframerate(16000)
-                destination.writeframes(evidence.pcm)
-            row["audio_path"] = str(path)
             row.setdefault("partial_pcm_bytes", len(evidence.pcm))
+            row.setdefault("partial_pcm_sha256", hashlib.sha256(evidence.pcm).hexdigest())
+            if not row.get("transport_success"):
+                row["partial_frames"] = evidence.frames
+                row["partial_perf_spans"] = evidence.spans
+            if not getattr(args, "no_save_audio", False):
+                path = args.output / f"case-{index:03d}.wav"
+                with wave.open(str(path), "wb") as destination:
+                    destination.setnchannels(1); destination.setsampwidth(2); destination.setframerate(16000)
+                    destination.writeframes(evidence.pcm)
+                row["audio_path"] = str(path)
         if owned:
             try:
                 row["stop"] = client.call("stop", instance_id=identifier)
@@ -343,6 +412,15 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ros-domain-id", type=int, default=int(os.environ.get("ROS_DOMAIN_ID", "0")))
     parser.add_argument("--topic-prefix", default="/benchmark/tts/input")
+    parser.add_argument("--discovery-mode", choices=("ready", "immediate", "delayed"), default="ready")
+    parser.add_argument("--subscriber-delay-s", type=float, default=.8,
+                        help="Audio subscription delay after speak dispatch, for delayed mode only")
+    parser.add_argument("--reuse-topic", action="store_true",
+                        help="Reuse one private instance/topic for sequential start/speak/stop cycles")
+    parser.add_argument("--no-save-audio", action="store_true",
+                        help="Keep PCM byte/hash and timing evidence without writing WAV files")
+    parser.add_argument("--allow-legacy-perf-metadata", action="store_true",
+                        help="Permit all four PCM integrity fields to be absent; report those checks as unavailable")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--text")
     group.add_argument("--cases", type=Path)
@@ -360,11 +438,17 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.rounds < 1 or not args.topic_prefix.startswith("/") or not 0 <= args.ros_domain_id <= 232:
         parser.error("Invalid rounds, absolute topic prefix, or ROS domain")
+    if not math.isfinite(args.subscriber_delay_s) or args.subscriber_delay_s < 0:
+        parser.error("--subscriber-delay-s must be finite and nonnegative")
     args.output.mkdir(parents=True, exist_ok=False)
     report = {"ok": False, "mcp_url": args.mcp_url, "ros_domain_id": args.ros_domain_id, "cases": [],
               "transport": "HTTP JSON-RPC tools/call(name=tts) -> ROS2 audio_msgs/msg/AudioChunk",
-              "timing_scope": "Client speak request dispatch to DDS first PCM/EOF; includes publisher prebuffer and real-time pacing. Not pure model inference RTF; private evaluator timing code not available.",
-              "validation_scope": "Exact format, nonzero PCM, EOF and matching successful perf spans/frame counts. Does not establish pronunciation, naturalness or transcript completeness.",
+              "discovery_mode": args.discovery_mode, "reuse_topic": args.reuse_topic,
+              "save_audio": not args.no_save_audio,
+              "allow_legacy_perf_metadata": args.allow_legacy_perf_metadata,
+              "subscriber_delay_s": args.subscriber_delay_s if args.discovery_mode == "delayed" else None,
+              "timing_scope": "Client speak dispatch to DDS first/last PCM and EOF. rtf retains EOF timing; rtf_last_pcm excludes EOF. Includes publisher pacing, not pure model inference.",
+              "validation_scope": "Exact format, nonzero PCM, EOF, successful perf spans and publisher frame counts. PCM byte/hash agreement is required unless explicitly allowing legacy spans with all four fields absent; those checks are reported unavailable. Does not establish pronunciation, naturalness or transcript completeness.",
               "python": platform.python_version(), "thresholds": {"ttft_s": args.max_ttft, "rtf": args.max_rtf},
               "client_code_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     try:

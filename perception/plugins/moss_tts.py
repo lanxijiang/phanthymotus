@@ -215,7 +215,7 @@ class MossTTSAdapter:
                 raise RuntimeError("All MOSS inference instances in this process are busy") from error
             audio_queue: queue.Queue = queue.Queue(maxsize=32)
             cancelled = threading.Event()
-            state: dict = {}
+            state: dict = {"pcm_bytes": 0}
             converter = MossPcm16Converter()
             output_path = self._output_dir / f"moss-{uuid.uuid4().hex}.wav"
 
@@ -234,6 +234,7 @@ class MossTTSAdapter:
                 pcm = converter.process(stereo)
                 if pcm:
                     offer(pcm)
+                    state["pcm_bytes"] += len(pcm)
 
             def produce() -> None:
                 try:
@@ -243,6 +244,8 @@ class MossTTSAdapter:
                         max_new_frames=375, voice_clone_max_text_tokens=75,
                         enable_wetext=True, output_audio_path=output_path,
                     )
+                    if not state["pcm_bytes"]:
+                        raise RuntimeError("MOSS synthesis returned no PCM for nonempty text")
                 except _Cancelled:
                     pass
                 except BaseException as error:
