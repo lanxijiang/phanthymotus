@@ -26,9 +26,9 @@ import logging
 import os
 import re
 
-from g2p_en import G2p
 from .symbols import punctuation
-from .english import eng_dict, refine_ph, post_replace_ph, arpa
+from .english import english_pronunciation, refine_ph, post_replace_ph, arpa
+from .english import _g2p as _g2p_en
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +39,10 @@ with open(os.path.join(current_file_path, "opencpop-strict.txt"), encoding="utf-
         for line in _f
     }
 
-_g2p_en = None
+# Reuse the predictor already loaded by the English frontend. Constructing
+# another G2p on the first mixed-language unknown word reloads the same weights
+# and dictionary during speak. Predictions use local state and read-only model
+# data; the mixed path below keeps its existing pronunciation/refinement rules.
 
 # Chinese initials — longest-first so 'zh'/'ch'/'sh' match before 'z'/'c'/'s'
 _INITIALS = [
@@ -61,11 +64,6 @@ _MIX_TOKEN_RE = re.compile(
     re.DOTALL,
 )
 _LETTER_SPELLED_UNITS = {"KB", "MB", "GB", "TB", "PB", "KBPS", "MBPS", "GBPS"}
-# Deterministic pronunciations missing from the stock CMU dictionary. Keep this
-# tiny and release-controlled: training/export and deployed runtime must match.
-_CUSTOM_EN_PRONUNCIATIONS = {
-    "IELTS": [["AY1"], ["EH0", "L", "T", "S"]],
-}
 
 
 def _split_pinyin(tone3: str):
@@ -125,7 +123,8 @@ def _zh_pinyin_to_phones(tone3: str):
 def _en_token_to_phones(word: str):
     """Convert a single English word/token to (phones, tones).
 
-    Lookup order: CMU dict → g2p_en fallback.
+    Lookup order: Liaoqianqian's explicit corrections → verified term fixes
+    → CMU → g2p_en fallback.
     All outputs go through refine_ph() + post_replace_ph() so they match
     the lowercase ARPAbet symbols in en_symbols (e.g. 'IY1' → 'iy', tone=2).
     """
@@ -142,7 +141,7 @@ def _en_token_to_phones(word: str):
             phones.extend(letter_phones)
             tones.extend(letter_tones)
         return phones, tones
-    syllables = _CUSTOM_EN_PRONUNCIATIONS.get(word.upper(), eng_dict.get(word.upper()))
+    syllables = english_pronunciation(word)
     if syllables is not None:
         for syllable in syllables:
             for phn in syllable:
@@ -150,9 +149,6 @@ def _en_token_to_phones(word: str):
                 phones.append(post_replace_ph(phn))
                 tones.append(tone)
     else:
-        global _g2p_en
-        if _g2p_en is None:
-            _g2p_en = G2p()
         for ph in filter(lambda p: p != " ", _g2p_en(word)):
             if ph in arpa:
                 ph, tone = refine_ph(ph)

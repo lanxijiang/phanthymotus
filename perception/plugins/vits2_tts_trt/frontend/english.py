@@ -5,7 +5,10 @@ import inflect
 import numpy as np
 
 from .symbols import punctuation, symbols
+from .technical_text import normalize_technical_lexemes
 from .release_paths import frontend_data_dir, nltk_data_dir
+
+current_file_path = os.path.dirname(__file__)
 
 # Configure the verified release NLTK data path before importing g2p_en.
 NLTK_DATA_DIR = str(nltk_data_dir())
@@ -197,19 +200,52 @@ KNOWN_ACRONYMS = {
     'linkedin': 'linked in',
     'ios': 'I OS',
 }
+# These uppercase abbreviations share CMU keys with ordinary lowercase words.
+# Expand only complete uppercase tokens, before FST can lowercase them (IP).
+_EXPLICIT_UPPERCASE_ACRONYMS = frozenset({"US", "IT", "ID", "IP"})
+
+
+def _spell_explicit_uppercase_acronyms(text):
+    return _EN_LEXICON_WORD_RE.sub(
+        lambda match: " ".join(match.group())
+        if match.group() in _EXPLICIT_UPPERCASE_ACRONYMS else match.group(),
+        text,
+    )
 
 
 def _split_acronym(m):
-    """Split consecutive uppercase letters with spaces: GPT → G P T."""
+    """Keep a known pronunciation; spell unknown uppercase acronyms."""
+    word = m.group(0)
+    if english_pronunciation(word) is not None:
+        return word
     return " ".join(m.group(0))
+
+
+def _split_unknown_acronyms(text):
+    """Keep known dictionary words, including hyphens and apostrophes, intact."""
+    text = _spell_explicit_uppercase_acronyms(text)
+    protected = [
+        match.span()
+        for match in _EN_LEXICON_WORD_RE.finditer(text)
+        if english_pronunciation(match.group()) is not None
+    ]
+
+    def replace(match):
+        if any(start <= match.start() and match.end() <= end
+               for start, end in protected):
+            return match.group()
+        return _split_acronym(match)
+
+    return ACRONYM_SPLIT_RE.sub(replace, text)
 
 
 def text_normalize(text):
     text = preprocess_text(text)
+    text = normalize_technical_lexemes(text)
     for name, replacement in KNOWN_ACRONYMS.items():
         text = re.sub(rf"\b{re.escape(name)}\b", replacement, text, flags=re.I)
     # Split acronyms before normalization so G2P reads them letter-by-letter
-    text = ACRONYM_SPLIT_RE.sub(_split_acronym, text)
+    text = _split_unknown_acronyms(text)
     text = normalize_numbers(text)
     text = expand_abbreviations(text)
     text = replace_punctuation(text)
@@ -221,9 +257,10 @@ def text_normalize(text):
 def text_normalize_without_numbers(text):
     """Normalize an English fragment without expanding Arabic numerals."""
     text = preprocess_text(text)
+    text = normalize_technical_lexemes(text)
     for name, replacement in KNOWN_ACRONYMS.items():
         text = re.sub(rf"\b{re.escape(name)}\b", replacement, text, flags=re.I)
-    text = ACRONYM_SPLIT_RE.sub(_split_acronym, text)
+    text = _split_unknown_acronyms(text)
     text = expand_abbreviations(text)
     text = replace_punctuation(text)
     text = PUNCT_SPACE_RE.sub(r"\1 \2", text)
@@ -288,14 +325,103 @@ def get_dict():
 eng_dict = get_dict()
 
 
+CUSTOM_EN_PRONUNCIATIONS = {
+    "CUDA": [["K", "UW1", "D", "AH0"]],
+    "HAMI": [["HH", "AE1", "M", "IY0"]],
+    "IELTS": [["AY1"], ["EH0", "L", "T", "S"]],
+}
+
+
+# Narrow corrections from the IPA retained in lexicon_rules_generated.py.
+# Keep them separate from Liaoqianqian's original three CUSTOM entries.
+VERIFIED_EN_PRONUNCIATIONS = {
+    # wordlist_37, i-wangtianshuo: /əˈdʒɛntɪk/; g2p_en adds a final T.
+    "AGENTIC": [["AH0", "JH", "EH1", "N", "T", "IH0", "K"]],
+    # user_terms_397, zhangjinghong: /ɛnˈvɪdiə/, stressed on the second syllable.
+    "NVIDIA": [["EH0", "N", "V", "IH1", "D", "IY0", "AH0"]],
+}
+
+
+def english_pronunciation(token):
+    """Liaoqianqian CUSTOM, verified terms, then CMU, shared by both G2P routes.
+
+    Return None for the caller's existing G2P fallback. Previously installed
+    external overlays are deliberately not consulted.
+    """
+    word = token.upper()
+    return CUSTOM_EN_PRONUNCIATIONS.get(
+        word, VERIFIED_EN_PRONUNCIATIONS.get(word, eng_dict.get(word)),
+    )
+
+
+_EN_LEXICON_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]*(?:['.-][A-Za-z0-9_]+)*(?![A-Za-z0-9_])"
+)
+_EN_TN_CONTEXT_WORDS = frozenset({
+    "USD", "EUR", "GBP", "CNY", "RMB", "DR", "MR", "MRS", "MS", "ST",
+})
+# The released Chinese FST splits CAR and rewrites the internal "log" in
+# kilogram(s) as 对数. Protect complete words only, including unit words
+# already expanded by the language layer; pronunciation still uses CMU/G2P.
+_EN_TN_PRESERVED_WORDS = frozenset({"CAR", "KILOGRAM", "KILOGRAMS"})
+# Lexeme rules already spell initialisms such as AI/API as A I/A P I.
+# Keep that explicit spelling together so sentence-final I. is not interpreted
+# as a Roman list number. A standalone I./II./IV. still belongs to the FST.
+_SPELLED_LETTERS_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?<![A-Za-z0-9_]['.-])"
+    r"[A-Z](?:[ \t]+[A-Z])+(?![A-Za-z0-9_]|['.-][A-Za-z0-9_])"
+)
+
+
+def normalize_preserving_english_pronunciations(text, normalize_plain):
+    """Preserve explicit letter spellings and selected complete words in TN.
+
+    Called only on ordinary spans after the existing address, number, unit and
+    identifier handlers. Explicit lexeme rewrites retain priority. Versioned
+    model names are deliberately not split here: their digits and surrounding
+    context remain owned by the existing frontend.
+
+    Custom/verified terms and known FST exceptions keep their spelling. Other
+    words follow the existing text normalizer and CMU/G2P path.
+    """
+    text = _spell_explicit_uppercase_acronyms(text)
+    protected = list(_SPELLED_LETTERS_RE.finditer(text))
+    for match in _EN_LEXICON_WORD_RE.finditer(text):
+        word = match.group().upper()
+        if (len(word) >= 3 and word not in _EN_TN_CONTEXT_WORDS
+                and (word in CUSTOM_EN_PRONUNCIATIONS
+                     or word in VERIFIED_EN_PRONUNCIATIONS
+                     or word in _EN_TN_PRESERVED_WORDS)):
+            protected.append(match)
+    if not protected:
+        return normalize_plain(text)
+    if re.search(r"[\r\n]", text):
+        # A protected token can leave a newline at the edge of an FST span,
+        # where it is stripped. Keep paragraph boundaries for punctuation TN.
+        return "\n".join(
+            normalize_preserving_english_pronunciations(line, normalize_plain)
+            for line in re.split(r"\r\n|\r|\n", text)
+        )
+    output, cursor = [], 0
+    for match in sorted(protected, key=lambda item: item.start()):
+        if cursor < match.start():
+            output.append(normalize_plain(text[cursor:match.start()]))
+        output.append(match.group())
+        cursor = match.end()
+    if cursor < len(text):
+        output.append(normalize_plain(text[cursor:]))
+    return " ".join(part.strip() for part in output if part.strip())
+
+
 def g2p_token(token):
     if token in punctuation:
         return (token,), (0,)
     # Uppercase A is a spelled letter (for example, OA), not the article "a".
     if token == "A":
         return ("ey",), (2,)
-    if token.upper() in eng_dict:
-        phns, tns = refine_syllables(eng_dict[token.upper()])
+    syllables = english_pronunciation(token)
+    if syllables is not None:
+        phns, tns = refine_syllables(syllables)
         return tuple(post_replace_ph(i) for i in phns), tuple(tns)
     phone_list = [p for p in _g2p(token) if p != " "]
     phns, tns = [], []
