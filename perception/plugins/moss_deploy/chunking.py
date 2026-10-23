@@ -58,6 +58,44 @@ def _safe_cuts(text: str) -> list[int]:
     return sorted(set(cuts)) + [len(text)]
 
 
+def _original_safe_cuts(text: str, chunks: list[str]) -> list[int]:
+    """Reuse original CJK cuts that locate exactly in the source text."""
+    protected = [(match.start(), match.end()) for pattern in (_THAI_RUN, _NUMBER_UNIT)
+                 for match in pattern.finditer(text)]
+    cuts = []
+    search_from = 0
+    for chunk in chunks[:-1]:
+        if not isinstance(chunk, str) or not chunk.strip():
+            break
+        found = text.find(chunk, search_from)
+        if found < 0:
+            break
+        cut = found + len(chunk)
+        if (0 < cut < len(text)
+                and not any(begin < cut < end for begin, end in protected)
+                and not (_latin_word_character(text[cut - 1])
+                         and _latin_word_character(text[cut]))):
+            cuts.append(cut)
+        search_from = cut
+    return cuts
+
+
+def _punctuation_only(text: str) -> bool:
+    piece = text.strip()
+    return bool(piece) and all(char.isspace() or unicodedata.category(char).startswith("P")
+                               for char in piece)
+
+
+def _single_protected_piece(text: str) -> bool:
+    """Allow one indivisible Thai run or number/unit expression past 75 tokens."""
+    piece = text.strip()
+    while piece and unicodedata.category(piece[0]).startswith("P"):
+        piece = piece[1:].lstrip()
+    while piece and unicodedata.category(piece[-1]).startswith("P"):
+        piece = piece[:-1].rstrip()
+    return bool(_THAI_RUN.fullmatch(piece) or _NUMBER_UNIT.fullmatch(piece))
+
+
 def _non_whitespace(parts: list[str]) -> str:
     return "".join(character for part in parts for character in part if not character.isspace())
 
@@ -136,6 +174,7 @@ def split_preserving_boundaries(
         return []
     if text_capacity < 1:
         raise ValueError("Global prefill profile has no capacity for text")
+    preferred = min(max(1, int(max_tokens)), text_capacity)
     original = original_split(text, max_tokens)
     # The original splitter may normalize spaces and add its known terminal
     # punctuation, but losing, duplicating or reordering spoken characters
@@ -144,10 +183,13 @@ def split_preserving_boundaries(
     invalid_original = (
         not original
         or any(not isinstance(chunk, str) or not chunk.strip() for chunk in original)
+        or any(_punctuation_only(chunk) for chunk in original)
         or not _author_text_preserved(text, original)
         or not _latin_spacing_preserved(text, original)
         or _protected_runs(original) != _protected_runs([text])
         or any(count_tokens(chunk) > text_capacity for chunk in original)
+        or any(count_tokens(chunk) > preferred and not _single_protected_piece(chunk)
+               for chunk in original)
     )
     position = 0
     unsafe = invalid_original
@@ -157,22 +199,48 @@ def split_preserving_boundaries(
             unsafe |= risk
     if not unsafe:
         return original
-    if count_tokens(text) <= text_capacity:
+    if count_tokens(text) <= preferred:
         return [text]
 
-    cuts = _safe_cuts(text)
+    cuts = sorted(set(_safe_cuts(text) + _original_safe_cuts(text, original)))
     chunks = []
     start = 0
+    next_cut = 0
     while start < len(text):
-        feasible = [cut for cut in cuts if cut > start and count_tokens(text[start:cut].strip()) <= text_capacity]
-        if not feasible:
+        end = None
+        end_index = None
+        for index in range(next_cut, len(cuts)):
+            cut = cuts[index]
+            piece = text[start:cut].strip()
+            if not piece or _punctuation_only(piece):
+                continue
+            tokens = count_tokens(piece)
+            if tokens <= preferred:
+                end, end_index = cut, index
+                continue
+            # Tokenizers are not strictly monotonic across appended text. A
+            # prefix under budget is safe; scanning the whole remaining text
+            # at every step is not. A single protected run is the only case
+            # allowed to exceed the preferred budget.
+            if end is None and tokens <= text_capacity and _single_protected_piece(piece):
+                end, end_index = cut, index
+            break
+        if end is None:
+            if chunks and _punctuation_only(text[start:]):
+                joined = chunks[-1] + text[start:].strip()
+                joined_tokens = count_tokens(joined)
+                if joined_tokens <= text_capacity and (
+                    joined_tokens <= preferred or _single_protected_piece(joined)
+                ):
+                    chunks[-1] = joined
+                    break
             raise ValueError(
                 "Text has no safe chunk boundary within the global prefill profile; "
                 "add a space or punctuation at a natural phrase boundary"
             )
-        end = feasible[-1]
         chunks.append(text[start:end].strip())
         start = end
+        next_cut = end_index + 1
     if any(count_tokens(chunk) > text_capacity for chunk in chunks):
         raise AssertionError("Safe text splitting exceeded the global prefill profile")
     return chunks

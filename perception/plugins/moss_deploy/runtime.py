@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import threading
 from pathlib import Path
@@ -18,6 +19,9 @@ from .completeness import validate_chunk_result
 from .si_units import prepare_with_si_unit_guard
 from .pool import SessionAdapter, SharedGraphPool
 from .selected_logits import SelectedAudioScores, wrap_selected_outputs
+
+
+log = logging.getLogger(__name__)
 
 
 GENERATION_DEFAULTS = {
@@ -314,12 +318,17 @@ def _create_original_adapter_class(pool: SharedGraphPool):
             if codes is None:
                 raise RuntimeError("Reference audio codes must be resolved before text chunking")
             prefill_max = int(assets.graphs["global_unified"]["profiles"]["input_ids"]["max"][1])
-            return split_preserving_boundaries(
+            capacity = prompt_text_capacity(self, codes, prefill_max)
+            chunks = split_preserving_boundaries(
                 text, max_tokens,
                 original_split=lambda value, budget: original.OnnxTtsRuntime.split_voice_clone_text(self, value, max_tokens=budget),
                 count_tokens=self.count_text_tokens,
-                text_capacity=prompt_text_capacity(self, codes, prefill_max),
+                text_capacity=capacity,
             )
+            log.info("[moss] split chars=%d chunks=%d tokens=%s preferred=%d capacity=%d",
+                     len(text), len(chunks), [self.count_text_tokens(chunk) for chunk in chunks],
+                     max_tokens, capacity)
+            return chunks
 
         def decode_full_audio(self, generated_frames):
             _require_full_codec_decoder(pool)
@@ -361,6 +370,10 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 pause = self.estimate_voice_clone_inter_chunk_pause_seconds(self._previous_stream_chunk_text)
                 self._request_audio_callback(np.zeros((round(48000 * pause), 2), dtype=np.float32))
             result = super().synthesize_single_chunk(text=text, prompt_audio_codes=prompt_audio_codes, streaming=streaming)
+            token_ids = result.get("text_token_ids")
+            log.info("[moss] chunk chars=%d text_tokens=%s generated_frames=%d frame_limit=%s",
+                     len(text), None if token_ids is None else len(token_ids), len(result["generated_frames"]),
+                     self.manifest["generation_defaults"].get("max_new_frames"))
             validate_chunk_result(result, self.manifest["generation_defaults"])
             self._previous_stream_chunk_text = text
             return result

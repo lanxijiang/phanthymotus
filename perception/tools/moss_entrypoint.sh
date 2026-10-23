@@ -17,4 +17,6 @@ fi
 # weights or build engines. The adapter downloads and verifies packaged assets.
 "$frontend" /work/tools/moss_runtime_preflight.py
 cd /work
-exec "$frontend" /work/main.py "$@"
+# Keep Python thread stacks in the existing container log if a native library
+# faults. This is diagnostic only; it does not recover or hide a failed process.
+exec "$frontend" -X faulthandler /work/main.py "$@"
