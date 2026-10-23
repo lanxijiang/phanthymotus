@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from plugins.moss_pacing import BoundedAudioPacer
+from plugins.moss_transport import MossAudioTransport
 from plugins.moss_tts import MossTTSAdapter
 import plugins.tts as tts
 
@@ -113,7 +114,8 @@ def test_only_capable_adapter_gets_bounded_transport():
     moss = tts._TTSNode('/moss', SimpleNamespace(
         transport_lead_seconds=MossTTSAdapter.transport_lead_seconds))
     legacy = tts._TTSNode('/legacy', SimpleNamespace())
-    assert moss._audio_pacer.max_ahead_s == 1.0
+    assert moss._audio_pacer.mode == "paced"
+    assert moss._audio_pacer._pacer.max_ahead_s == 1.0
     assert legacy._audio_pacer is None
 
 
@@ -148,7 +150,10 @@ def test_actual_worker_keeps_pcm_eof_and_credit_across_utterances(monkeypatch):
     monkeypatch.setattr(tts.threading, 'Thread', InlineThread)
     monkeypatch.setattr(tts, 'fire_hook', lambda name: None)
     node = tts._TTSNode('/actual-worker', Adapter())
-    node._audio_pacer = make_pacer(clock)
+    node._audio_pacer = MossAudioTransport(
+        subscriber_count=lambda: 1, settle_s=0,
+        clock=clock.time, sleep=clock.sleep,
+    )
     node.state = 'running'
     node.enqueue("First.")
     node.enqueue("Second.")
@@ -176,5 +181,5 @@ def test_actual_worker_keeps_pcm_eof_and_credit_across_utterances(monkeypatch):
     assert utterances == list(payloads.values()) and not pending
     assert eof_count == 2
     assert clock.now == pytest.approx(.56 + 2.08 - 1.0)
-    assert node._audio_pacer._audio_end_s - clock.now == pytest.approx(1.0)
+    assert node._audio_pacer._pacer._audio_end_s - clock.now == pytest.approx(1.0)
     assert [len(pcm) for _, pcm, _ in messages if pcm != tts.AUDIO_EOF_MAGIC][-1] == 1280

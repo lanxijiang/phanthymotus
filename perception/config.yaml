@@ -73,6 +73,12 @@ plugins:
     # The archive hash and size are pinned in plugins/moss_assets.py.
     moss_asset_url: "http://172.28.4.81:34567/i-lanxijiang/phanthymotus-tts/moss-orin-jp61-frame-v4-20261010.tar"
     moss_language: auto
+    # Darvin writes the complete PCM stream to a file. Send generated PCM at
+    # synthesis speed without changing samples or playback speed. For the
+    # browser/robot live player, use paced to bound queued audio to one second.
+    # These MOSS-only deployment settings take effect after service restart.
+    moss_transport_mode: as_generated
+    moss_subscriber_settle_s: 0.5
     # Judgeflow launches three perception containers; one runtime in each gives
     # three concurrent model instances on the shared Orin.
     moss_instances: 1

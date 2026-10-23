@@ -1336,6 +1336,8 @@ def _build_tts_adapter(cfg: dict, on_status=None) -> TTSAdapter:
             language=cfg.get('moss_language') or 'auto',
             instances=int(cfg.get('moss_instances', 1)),
             asset_url=cfg.get('moss_asset_url'),
+            transport_mode=cfg.get('moss_transport_mode', 'paced'),
+            subscriber_settle_s=cfg.get('moss_subscriber_settle_s', 0.1),
         )
     if engine == 'mms-th':
         return MmsThaiTTSAdapter(
@@ -1375,8 +1377,13 @@ class _TTSNode(Node):
         self._audio_pacer = None
         transport_lead = getattr(adapter, "transport_lead_seconds", None)
         if transport_lead is not None:
-            from plugins.moss_pacing import BoundedAudioPacer
-            self._audio_pacer = BoundedAudioPacer(transport_lead)
+            from plugins.moss_transport import MossAudioTransport
+            self._audio_pacer = MossAudioTransport(
+                mode=getattr(adapter, "transport_mode", "paced"),
+                max_ahead_s=transport_lead,
+                subscriber_count=lambda: self._pub.get_subscription_count(),
+                settle_s=getattr(adapter, "subscriber_settle_s", 0.1),
+            )
         self.state         = "idle"
         self._text_queue   = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
@@ -1574,10 +1581,16 @@ class _TTSNode(Node):
                     return (self._stop_event.is_set() or self._interrupt_flag.is_set()
                             or utterance_abort.is_set())
 
+                if self._audio_pacer is not None:
+                    # MOSS only: overlap real reader matching with synthesis.
+                    self._audio_pacer.begin_utterance(cancelled_publish)
+
                 def emit(frame: bytes) -> bool:
                     """Pace and publish one frame; latches the clock on the first."""
                     nonlocal t0, t0_wall
                     if t0 is None:
+                        if self._audio_pacer is not None and not self._audio_pacer.wait_ready():
+                            return False
                         # Backdate by the frames already in the prebuffer so all
                         # of them are due in the past and go out in one burst —
                         # the consumer then starts holding PREBUF_FRAMES of audio.
@@ -1660,6 +1673,8 @@ class _TTSNode(Node):
                     if self._stop_event.is_set() or self._interrupt_flag.is_set():
                         interrupted = True
                         break
+                    if self._audio_pacer is not None and t0 is None:
+                        self._audio_pacer.poll_ready()
                     try:
                         frame = frame_queue.get(timeout=0.1)
                     except queue.Empty:
@@ -1672,7 +1687,9 @@ class _TTSNode(Node):
                         break
                     if t0 is None:
                         prebuf.append(frame)
-                        if len(prebuf) >= PREBUF_FRAMES:
+                        # MOSS already streams codec PCM; do not wait for an
+                        # extra five-frame batch after its first real frame.
+                        if len(prebuf) >= (1 if self._audio_pacer is not None else PREBUF_FRAMES):
                             if not flush_prebuf():
                                 interrupted = True
                                 break
@@ -1694,7 +1711,9 @@ class _TTSNode(Node):
                 # flush remainder
                 if buf and not cancelled:
                     if self._audio_pacer is not None:
-                        self._audio_pacer.publish_frame(buf, publish, cancelled_publish)
+                        # A sub-frame MOSS response also needs reader matching.
+                        if not emit(buf):
+                            cancelled = True
                     else:
                         if t0 is not None:
                             target = t0 + frames_sent * FRAME_INTERVAL_S
@@ -1707,6 +1726,10 @@ class _TTSNode(Node):
                 # made this always False, so an interrupted utterance reported ACP
                 # "completed" instead of "cancelled".
                 was_interrupted = self._interrupt_flag.is_set()
+                if self._audio_pacer is not None:
+                    # MOSS may be stopped while waiting for its first reader.
+                    # No audio in that case must not be reported as completed.
+                    was_interrupted = was_interrupted or cancelled
                 # 这里刻意不再 clear()。flag 的装载/解除只在出队时、_interrupt_lock
                 # 下进行；在这条路径上也清一次会和并发的 interrupt() 抢跑，把信号
                 # 丢给下一句。

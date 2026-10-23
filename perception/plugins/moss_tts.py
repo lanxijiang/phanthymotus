@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -39,9 +40,16 @@ class MossTTSAdapter:
     def __init__(self, model_dir: str, *, speaker_id: int = 0,
                  language: str = "auto", instances: int = 1,
                  asset_url: str | None = None, output_dir: str | Path | None = None,
-                 runtimes=None, lease_timeout_s: float = 10.0):
+                 runtimes=None, lease_timeout_s: float = 10.0,
+                 transport_mode: str = "paced", subscriber_settle_s: float = 0.1):
         if not 1 <= instances <= 3:
             raise ValueError("MOSS instances per process must be 1..3")
+        if transport_mode not in {"paced", "as_generated"}:
+            raise ValueError("MOSS transport_mode must be paced or as_generated")
+        self.transport_mode = transport_mode
+        self.subscriber_settle_s = float(subscriber_settle_s)
+        if not math.isfinite(self.subscriber_settle_s) or not 0 <= self.subscriber_settle_s <= 5:
+            raise ValueError("MOSS subscriber_settle_s must be finite and within 0..5 seconds")
         self._model_dir = Path(model_dir).resolve()
         self._output_dir = Path(output_dir or self._model_dir.parent / "outputs").resolve()
         self._output_dir.mkdir(parents=True, exist_ok=True)

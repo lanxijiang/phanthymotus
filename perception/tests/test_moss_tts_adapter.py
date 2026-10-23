@@ -65,8 +65,18 @@ def test_default_one_runtime_per_process(tmp_path):
         runtimes=[runtime],
     )
     assert adapter.warmup() == 3200
+    assert adapter.transport_mode == "paced"
     assert len(runtime.calls) == 1
     adapter.close()
+
+
+@pytest.mark.parametrize("settings", [
+    {"transport_mode": "fast"}, {"subscriber_settle_s": -1},
+    {"subscriber_settle_s": float("nan")}, {"subscriber_settle_s": 6},
+])
+def test_invalid_transport_configuration_fails_before_loading_models(tmp_path, settings):
+    with pytest.raises(ValueError, match="MOSS"):
+        MossTTSAdapter(str(tmp_path / "missing"), **settings)
 
 
 def test_adapter_consumes_codec_callbacks_as_pcm_and_removes_original_wav(tmp_path):
