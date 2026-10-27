@@ -14,9 +14,11 @@ ARG PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple/
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
 ARG JP_VERSION=511
 ARG ENABLE_VITS2_TRT=1
+ARG ENABLE_MOSS_TRT=1
 
 FROM bj-warehouse.tencentcloudcr.com/phanthy-motus/jetson-base:jp${JP_VERSION}-torch
-ARG PYPI_MIRROR APT_MIRROR JP_VERSION ENABLE_VITS2_TRT
+ARG PYPI_MIRROR APT_MIRROR JP_VERSION ENABLE_VITS2_TRT ENABLE_MOSS_TRT
+ENV MOSS_BUILT_FOR_JP="${JP_VERSION}" MOSS_BUILT_ENABLED="${ENABLE_MOSS_TRT}"
 
 # ── Everything that differs per JetPack line, resolved once ──────────────────
 # These facts used to be restated at each point of use — the numpy pin appeared
@@ -588,6 +590,42 @@ COPY perception/utils/     /work/utils/
 COPY perception/config.yaml /work/config.yaml
 COPY perception/deploy/    /deploy/
 
+# MOSS resources and audio models are downloaded separately at runtime. These
+# files install only the isolated JP6 frontend. This leaderboard image selects
+# MOSS on JP6; JP5 and builds without MOSS retain the official startup path.
+# No PyTorch/CUDA/TRT package is replaced.
+COPY perception/tools/moss_prepare_frontend.sh /opt/moss-install/moss_prepare_frontend.sh
+COPY perception/tools/moss_frontend_lock.py /opt/moss-install/moss_frontend_lock.py
+COPY perception/tools/moss_frontend_aarch64.lock /opt/moss-install/moss_frontend_aarch64.lock
+COPY perception/tools/moss_runtime_preflight.py /opt/moss-install/moss_runtime_preflight.py
+COPY perception/tools/moss_runtime_preflight.py /work/tools/moss_runtime_preflight.py
+COPY perception/tools/moss_trt_session.py /work/tools/moss_trt_session.py
+COPY perception/tools/moss_runtime_config.py /work/tools/moss_runtime_config.py
+COPY perception/tools/moss_entrypoint.sh /work/tools/moss_entrypoint.sh
+COPY perception/tools/moss_darvin_entrypoint.sh /work/tools/moss_darvin_entrypoint.sh
+RUN case "${ENABLE_MOSS_TRT}" in 0|1) ;; *) echo 'ENABLE_MOSS_TRT must be 0 or 1' >&2; exit 1;; esac && \
+    if [ "${JP_VERSION}" = "61" ] && [ "${ENABLE_MOSS_TRT}" = "1" ]; then \
+      if ! /usr/bin/python3 -c "import ctypes; ctypes.CDLL('libthai.so.0')" || \
+         ! test -r /usr/share/libthai/thbrk.tri; then \
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libthai0 && \
+        rm -rf /var/lib/apt/lists/*; \
+      fi && \
+      LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 \
+        LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/opt/nvidia/dla-fallback" \
+        bash /opt/moss-install/moss_prepare_frontend.sh \
+          --prefix /opt/moss-frontend --python /usr/bin/python3 \
+          --lock /opt/moss-install/moss_frontend_aarch64.lock --build-check && \
+      /usr/bin/python3 -m pip install --no-cache-dir --no-deps --only-binary=:all: \
+        -i "${PYPI_MIRROR}" --target /opt/moss-frontend/env/lib/python3.10/site-packages \
+        'sentencepiece==0.2.0' && \
+      bash -c 'source /opt/ros/humble/install/setup.bash && source /ros_ws/install/setup.bash && \
+        LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 \
+        LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/opt/nvidia/dla-fallback" \
+        /opt/moss-frontend/runtime-python /work/tools/moss_runtime_preflight.py --build-check' && \
+      rm -rf /opt/moss-frontend/downloads /opt/moss-frontend/work \
+        /opt/moss-frontend/mamba-root /opt/moss-frontend/mamba; \
+    fi
+
 # ── Thai frontend self-check, on the real interpreter ──────────────────────────
 # Runs the frontend that was just copied in, on the Python this image actually
 # ships, and asserts the one invariant the Thai engine depends on: every character
@@ -694,9 +732,6 @@ ENV PYTHONUNBUFFERED=1
 # exactly the "garbage characters" that make `docker logs` unreadable.
 ENV RCUTILS_COLORIZED_OUTPUT=0
 
-CMD ["/bin/bash", "-c", \
-    "export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 && \
-     source /opt/ros/humble/install/setup.bash && \
-     source /ros_ws/install/setup.bash && \
-     source /etc/dla-fallback.env && \
-     python3 /work/main.py"]
+# Leaderboard-specific image defaults to MOSS. Do not merge this default CMD
+# into the common Perception image without an explicit deployment decision.
+CMD ["/bin/bash", "/work/tools/moss_darvin_entrypoint.sh"]
