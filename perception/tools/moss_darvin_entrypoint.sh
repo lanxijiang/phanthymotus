@@ -27,6 +27,10 @@ case "${MOSS_ENABLE:-0}" in
         cd /work
         config_dir=$(mktemp -d /tmp/moss-deployment.XXXXXX)
         config="$config_dir/config.yaml"
+        # This entrypoint is specific to the TTS leaderboard image. Avoid
+        # starting unrelated perception plugins in each benchmark container;
+        # an operator can explicitly request the full service with value 0.
+        export MOSS_TTS_ONLY="${MOSS_TTS_ONLY:-1}"
         /usr/bin/python3 /work/tools/moss_runtime_config.py --moss-config "$config"
         export CONFIG_PATH="$config"
         model_dir="${MOSS_MODEL_DIR:-/models/moss-zh5-fp32-trt-runtime-20261028/assets}"

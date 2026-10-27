@@ -10,13 +10,17 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tarfile
+import time
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
+
+log = logging.getLogger(__name__)
 
 
 # SHA and byte count of the reviewed portable bundle. Rebuilding the bundle
@@ -82,6 +86,9 @@ def _download(url: str, destination: Path, sha256: str, size: int) -> None:
         raise ValueError(f"MOSS_ASSET_URL must be under http://{ASSET_HOST}:{ASSET_PORT}/")
     digest = hashlib.sha256()
     received = 0
+    started = time.monotonic()
+    next_progress = 10
+    log.info("[moss-assets] downloading pinned archive (%.1f MiB)", size / (1024 * 1024))
     # The internal JuiceFS endpoint must bypass HTTP(S)_PROXY in the image.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(url, timeout=30) as response, destination.open("xb") as output:
@@ -91,13 +98,24 @@ def _download(url: str, destination: Path, sha256: str, size: int) -> None:
                 raise ValueError("MOSS archive exceeds its pinned byte count")
             digest.update(chunk)
             output.write(chunk)
+            percent = received * 100 // size
+            if percent >= next_progress:
+                log.info("[moss-assets] download %d%% (%.1f/%.1f MiB, %.1fs)",
+                         min(percent, 100), received / (1024 * 1024),
+                         size / (1024 * 1024), time.monotonic() - started)
+                next_progress = (percent // 10 + 1) * 10
         output.flush()
         os.fsync(output.fileno())
     if received != size or digest.hexdigest() != sha256:
         raise ValueError(f"MOSS archive integrity mismatch: bytes={received}, sha256={digest.hexdigest()}")
+    log.info("[moss-assets] archive size and SHA256 verified in %.1fs", time.monotonic() - started)
 
 
 def _extract_regular_files(archive_path: Path, staging: Path) -> None:
+    started = time.monotonic()
+    extracted = 0
+    next_progress = 256 * 1024 * 1024
+    log.info("[moss-assets] extracting verified archive")
     with tarfile.open(archive_path, "r:") as archive:
         for member in archive:
             name = member.name
@@ -117,6 +135,13 @@ def _extract_regular_files(archive_path: Path, staging: Path) -> None:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
             if target.stat().st_size != member.size:
                 raise ValueError(f"Truncated MOSS archive member: {name!r}")
+            extracted += member.size
+            if extracted >= next_progress:
+                log.info("[moss-assets] extracted %.1f MiB in %.1fs",
+                         extracted / (1024 * 1024), time.monotonic() - started)
+                next_progress = (extracted // (256 * 1024 * 1024) + 1) * (256 * 1024 * 1024)
+    log.info("[moss-assets] extracted %.1f MiB in %.1fs",
+             extracted / (1024 * 1024), time.monotonic() - started)
 
 
 def ensure_moss_assets(asset_dir: str | Path, *, url: str | None = None,
@@ -128,6 +153,7 @@ def ensure_moss_assets(asset_dir: str | Path, *, url: str | None = None,
     """
     destination = Path(asset_dir).resolve()
     if _ready(destination, sha256, size):
+        log.info("[moss-assets] verified asset cache is ready")
         return destination
     if not url:
         raise FileNotFoundError(
@@ -137,8 +163,13 @@ def ensure_moss_assets(asset_dir: str | Path, *, url: str | None = None,
     destination.parent.mkdir(parents=True, exist_ok=True)
     lock_path = destination.parent / f".{destination.name}.download.lock"
     with lock_path.open("a+b") as lock:
+        waiting_since = time.monotonic()
+        log.info("[moss-assets] waiting for asset installation lock")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        log.info("[moss-assets] asset installation lock acquired after %.1fs",
+                 time.monotonic() - waiting_since)
         if _ready(destination, sha256, size):
+            log.info("[moss-assets] verified asset cache was installed by another process")
             return destination
         if destination.exists():
             raise RuntimeError(f"Existing MOSS asset directory is incomplete: {destination}")
@@ -156,6 +187,7 @@ def ensure_moss_assets(asset_dir: str | Path, *, url: str | None = None,
                 encoding="utf-8",
             )
             os.replace(staging, destination)
+            log.info("[moss-assets] asset installation complete")
             return destination
         finally:
             partial.unlink(missing_ok=True)

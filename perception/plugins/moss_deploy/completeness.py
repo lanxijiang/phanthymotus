@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import unicodedata
 
 
 log = logging.getLogger(__name__)
@@ -12,10 +13,18 @@ def minimum_chunk_frames(text: str) -> int:
     """Detect only impossible long-text collapses, not pronunciation quality.
 
     One native frame is 80 ms. Eight letters/digits cannot form a complete
-    ordinary utterance in that time. Keep single sounds/interjections valid;
-    punctuation alone is not evidence of a long utterance.
+    ordinary utterance in that time. Thai vowel and tone marks are part of
+    the written utterance but are not counted by ``isalnum``. Count those
+    marks only within the Thai Unicode block; other languages retain their
+    existing behavior. Keep short interjections and punctuation-only input.
     """
-    return 2 if sum(character.isalnum() for character in text) >= 8 else 1
+    written = sum(
+        character.isalnum()
+        or ("\u0e00" <= character <= "\u0e7f"
+            and unicodedata.category(character).startswith("M"))
+        for character in text
+    )
+    return 2 if written >= 8 else 1
 
 
 def generate_with_early_eos_guard(generate, request_rows, *, minimum_frames,

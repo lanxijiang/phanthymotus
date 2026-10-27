@@ -10,11 +10,21 @@ import json
 import re
 import sys
 import threading
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 
 
 _SOURCE_IMPORT_LOCK = threading.RLock()
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash assets without retaining the entire graph in host memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 # Only resolve short, unambiguous greetings which the upstream detector maps
@@ -33,15 +43,42 @@ _SHORT_LATIN_ANCHORS = {
 
 
 def _detect_language_with_short_latin_hints(text, original_detect):
-    """Keep upstream script/word routing except for clear short greetings.
+    """Keep upstream routing except for dominant scripts and short greetings.
 
     This is intentionally not a general language identifier. In particular,
     Han-only Japanese and numeric-only text remain ambiguous and unchanged.
     """
-    original = original_detect(text)
+    value = str(text or "")
+    original = original_detect(value)
+
+    # The author's detector prioritizes any Han character over Thai and
+    # Cyrillic. A short Chinese product name in an otherwise Thai or Russian
+    # sentence must not route the entire sentence through Chinese WeText.
+    # Override only when one of these scripts clearly dominates; keep the
+    # original result for ambiguous or similarly sized mixed-script text.
+    if original == "zh":
+        # URLs and email addresses may contain foreign scripts unrelated to
+        # the surrounding sentence. Keep the original routing for them.
+        if re.search(r"(?:https?://|ftp://|www\.|@|[^\s./]+\.[^\W\d_][\w-]*)", value, re.IGNORECASE):
+            return original
+        han = len(re.findall(r"[\u3400-\u9fff\uf900-\ufaff]", value))
+        # Count letters rather than Unicode blocks: Thai digits, punctuation
+        # and combining marks do not establish a Thai sentence by themselves.
+        thai = sum("\u0e00" <= ch <= "\u0e7f" and ch.isalpha() for ch in value)
+        cyrillic = sum("\u0400" <= ch <= "\u04ff" and ch.isalpha() for ch in value)
+        latin = sum(ch.isalpha() and "LATIN" in unicodedata.name(ch, "") for ch in value)
+        # A single foreign name can occur in an otherwise Chinese sentence.
+        # Require a longer Thai run or multiple Cyrillic words before changing
+        # normalization, rather than guessing from one short foreign word.
+        if thai >= 12 and thai >= 2 * max(han, cyrillic, latin):
+            return "th"
+        russian_words = re.findall(r"[\u0400-\u04ff]+", value)
+        if cyrillic >= 8 and len(russian_words) >= 2 and cyrillic >= 2 * max(han, thai, latin):
+            return "ru"
+
     if original != "en":
         return original
-    value = str(text or "").strip().lower()
+    value = value.strip().lower()
     # Reject mixed scripts, digits, apostrophes, and symbols rather than
     # treating a proper name or longer mixed-language sentence as a greeting.
     if not value or not re.fullmatch(r"[a-z\s.,!?;:]+", value):
@@ -250,7 +287,9 @@ class ModelAssets:
                 if not proof_path.is_file():
                     raise FileNotFoundError(f"Streaming codec compatibility proof is missing: {proof_path}")
                 proof = json.loads(proof_path.read_text(encoding="utf-8"))
-                if not proof.get("all_outputs_exact") or proof.get("source_sha256") != hashlib.sha256(self.streaming_source_step_path.read_bytes()).hexdigest() or proof.get("compatible_sha256") != hashlib.sha256(chosen_step.read_bytes()).hexdigest():
+                if (not proof.get("all_outputs_exact")
+                        or proof.get("source_sha256") != _sha256_file(self.streaming_source_step_path)
+                        or proof.get("compatible_sha256") != _sha256_file(chosen_step)):
                     raise ValueError("Selected codec_decode_step graph is not covered by the original-model compatibility proof")
             report_path = self.streaming_path.parent / "streaming_validation.json"
             if report_path.is_file():
