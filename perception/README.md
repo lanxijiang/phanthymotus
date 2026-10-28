@@ -3101,43 +3101,29 @@ actually covers. The horizontal terms and `half_fov_rad` stay correct, and
 consumer that starts using vertical geometry would be misled. Folding the crop
 through `inherit` is the fix.
 
-#### Calibration belongs to camera × model, so each model keeps its own pair
+#### One calibration pair, cleared when the model changes
 
-A log-affine fit corrects one camera's optics *as that model sees them*, so it
-is not transferable between backends: on r1_sz's ultra-wide lens YOLO needs
-`cal_b: -0.9753` — a factor of 2.65 — and what it corrects there is a fixed-K
-model's guess at a 102° lens, which is not the error DepthART makes, since
-DepthART is handed the real `K`. **DepthART's own residual on that lens has not
-been measured**, so "it should need less" is an expectation, not a result;
-measure it with `calibrate` before trusting either number.
+A log-affine fit is two numbers. They are `cal_a`/`cal_b`, there is one pair,
+and there is no field recording which model it belongs to — a per-model pair and
+a provenance marker are the same mistake in two shapes: both make the operator
+responsible for matching a number to a model, and that bookkeeping is exactly
+what goes wrong.
 
-So the coefficients are **keyed by model**: `cal_a`/`cal_b` are YOLO's pair and
-`cal_a_depthart`/`cal_b_depthart` are DepthART's. Switching models swaps which
-pair is read and changes nothing else — both survive in the saved row, and
-switching back restores the earlier fit rather than nothing.
+What makes one pair safe is that **switching `backend` clears it**, because a
+fit does not transfer between models: on r1_sz's ultra-wide lens YOLO needs
+`cal_b: -0.9753`, a factor of 2.65, correcting a fixed-K model's guess at a 102°
+lens — not an error DepthART makes, since DepthART is handed the real `K`.
+DepthART's own residual there has not been measured.
 
-**There is deliberately no marker saying which model a fit belongs to.** An
-earlier cut of this carried `calibration_backend` alongside a single pair and
-compared it against the active model. Two fields that must agree eventually did
-not, and the failure was expensive: on r1_bj the mismatch dropped the card's
-only calibration to `no calibrate`, **the canvas persisted the dropped row**,
-and every distance was then uncalibrated on a 102° lens — with a
-`calibration_note` as the only trace. Keyed storage cannot contradict itself,
-and `_select_backend` no longer strips calibration keys, which was the step
-that did the erasing.
+The clearing is not new; it is what #286 did. What is new is that it is **loud**:
+the `config` response and `info()` both carry a note saying the calibration was
+cleared and why, and it is logged. On r1_bj the same clearing happened silently,
+the canvas persisted the cleared row, and the card ran `model-default` on a 102°
+lens with nothing to say so. The stripping was never the defect — the silence was.
 
-No migration is needed: `cal_a`/`cal_b` keep their names and meaning, and every
-row already saved holds a YOLO fit by construction — it was the only model
-there was when those rows were written.
-
-The one cross-model rule that survives is the **preset table**, which is
-measured against YOLO26-depth. A preset selected under DepthART is dropped back
-to `no calibrate` — never silently: the note is on the `config` response, on
-`info()`, and in the log.
-
-What this does not fix on R1: a pinhole `K` is an approximation at ~102° with
-`distortion_model: unknown` and `D: null`, and `tan` overstates the lateral
-offset towards the edges. Expect DepthART to need site calibration there too.
+So the sequence after a model change is: recalibrate with `calibrate`, then put
+the returned `cal_a`/`cal_b` into the card's config. Until you do, `info()`
+reports `model-default` and distances are the engine's own fit.
 
 ### Why TensorRT *directly*, and not through ultralytics
 
@@ -4576,3 +4562,37 @@ difference.
 
 Measured on jp6.1 (Python 3.10.12, pytest 8.3.3): 175 passed / 1 failed with
 autoload on, **176 passed** with it off.
+
+## `measure` 卡片
+
+物体可见尺寸测量。消费 VOP 的 `data/json` 和一路 `image/depth-zlib`，输出：
+
+```text
+/perception/measure/state   data/json   当前对象、距离、可见宽高
+/perception/measure/view    image/jpeg  相机画面 + bbox + W×H 标签
+```
+
+它属于 Perception，不属于驱动：读的是 VOP/深度，不控制电机。相机彩色流由 depth
+话题推导（Bumi：`/camera/color`；G1：`/camera/rgb`），不需要在画布上把同一个 camera
+节点再接一次；需要覆盖时在 `config.yaml` 设置 `measure.camera_topic`。
+
+尺寸是**当前视角的可见外框**，不是完整三维长宽高。`clipped=true` 表示 bbox 贴边，
+数值只是下限；没有有效深度或没有检测到目标时不猜，输出 `null` 或空 `objects`。
+
+常用动作：
+
+- `read`：当前帧对象，可按 `target` 过滤；回答“现在这个多大”用它；
+- `info`：当前状态 + 最近活跃对象的紧凑 session 摘要；
+- `history`：有界、节流的历史记录；
+- `reset_session`：清空摘要/历史；
+- `config`：改 rate、置信度、深度分位、平滑窗口等。
+
+`view` 用 OpenCV 绘制（和这个镜像里现有的相机/姿态卡同一套栈），默认 5 Hz，
+`view_hz: 0` 关闭。`info` 的 `topic_out` 会声明两个输出口；查看图像用画布的
+「查看数据流」或 Monitor，不需要额外的 viewer 卡片。
+
+测试：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest perception/tests/test_measure_*.py -q
+```
