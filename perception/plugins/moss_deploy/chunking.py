@@ -183,6 +183,82 @@ def _protected_runs(parts: list[str]) -> tuple[list[str], ...]:
     )
 
 
+def _preserve_long_sentence_groups(text, chunks, preferred, count_tokens, split_group):
+    """Do not fill a complete sentence with the start of a longer sentence."""
+    if count_tokens(text) <= preferred:
+        return chunks
+    source = text if _non_whitespace(chunks) == _non_whitespace([text]) else _author_prepared_text(text)
+    protected = _structured_spans(source) + [(m.start(), m.end()) for m in _NUMBER_UNIT.finditer(source)]
+    # An unprotected ASCII period could be a sentence stop or an abbreviation.
+    # Do not reinterpret several such sentences as one long strong-stop group.
+    if any(char == "." and not any(begin <= index < end for begin, end in protected)
+           for index, char in enumerate(source)):
+        return chunks
+    ends = []
+    for match in re.finditer(r"[。！？!?；;]+", source):
+        if any(begin <= match.start() < end for begin, end in protected):
+            continue
+        end = match.end()
+        while end < len(source) and source[end] in "\"'”’)]}）】》」』»›":
+            end += 1
+        ends.append(end)
+    if len(ends) < 2:
+        return chunks
+    groups, start, position = [], 0, 0
+    for end in [*ends, len(source)]:
+        part = source[start:end].strip()
+        if part:
+            size = len(_non_whitespace([part]))
+            groups.append((start, end, position, position + size,
+                           count_tokens(part), end in ends))
+            position += size
+        start = end
+    # Compare offsets without whitespace: the author may join CJK sentences
+    # without the source's separating space. Only repair a complete sentence
+    # followed by a proper prefix of an over-budget, strong-stop sentence.
+    chunk_ranges, position = [], 0
+    for chunk in chunks:
+        end = position + len(_non_whitespace([chunk]))
+        chunk_ranges.append((position, end))
+        position = end
+    crossed = any(
+        complete and tokens > preferred
+        and any(left <= groups[index - 1][2] and begin < right < end
+                for left, right in chunk_ranges)
+        for index, (_start, _end, begin, end, tokens, complete) in enumerate(groups)
+        if index > 0 and groups[index - 1][5]
+    )
+    if not crossed:
+        return chunks
+    result, pending_start, pending_end = [], None, None
+
+    def flush():
+        nonlocal pending_start, pending_end
+        if pending_start is not None:
+            result.extend(split_group(source[pending_start:pending_end].strip()))
+            pending_start = pending_end = None
+
+    for start, end, _begin, _end, tokens, _complete in groups:
+        if tokens > preferred:
+            flush()
+            # This group has only one unprotected strong stop, so recursive
+            # safe splitting cannot enter this regrouping branch again.
+            result.extend(split_group(source[start:end].strip()))
+        else:
+            if pending_start is not None and count_tokens(source[pending_start:end].strip()) > preferred:
+                flush()
+            if pending_start is None:
+                pending_start = start
+            pending_end = end
+    flush()
+    if (not result or any(not part.strip() or _punctuation_only(part) for part in result)
+            or _non_whitespace(result) != _non_whitespace([source])
+            or _protected_runs(result) != _protected_runs([source])
+            or not _latin_spacing_preserved(source, result)):
+        return chunks
+    return result
+
+
 def _refine_long_mixed_chunks(chunks, count_tokens, text_capacity):
     """Separate complete strong-stop sentences only in long CJK/Latin chunks.
 
@@ -227,6 +303,7 @@ def split_preserving_boundaries(
     count_tokens: Callable[[str], int],
     text_capacity: int,
     thai_word_breaks: Callable[[str], list[int]] | None = None,
+    language: str | None = None,
 ) -> list[str]:
     """Repair unsafe original cuts; never discard text or exceed the prefill profile.
 
@@ -242,6 +319,34 @@ def split_preserving_boundaries(
     if text_capacity < 1:
         raise ValueError("Global prefill profile has no capacity for text")
     preferred = min(max(1, int(max_tokens)), text_capacity)
+    if language == "th" and count_tokens(text) > preferred:
+        # Thai spaces usually separate phrases rather than individual words.
+        # Do not fill the end of one phrase with words from the next phrase.
+        # Keep addresses, quantities and the repetition mark attached.
+        protected = _structured_spans(text) + [(m.start(), m.end()) for m in _NUMBER_UNIT.finditer(text)]
+        cuts = [m.end() for m in re.finditer(r"\s+", text)
+                if m.start() > 0 and m.end() < len(text)
+                and _THAI.fullmatch(text[m.start() - 1]) and _THAI.fullmatch(text[m.end()])
+                and not text[m.start() - 1].isdigit() and not text[m.end()].isdigit()
+                and text[m.end()] != "ๆ"
+                and not any(begin < m.end() < end for begin, end in protected)]
+        if cuts:
+            phrases, start = [], 0
+            for end in [*cuts, len(text)]:
+                phrase = text[start:end].strip()
+                if phrase:
+                    # Reuse the safe dictionary/structure-aware splitter,
+                    # without the upstream packer adding punctuation to each
+                    # newly isolated phrase or joining it to the next one.
+                    phrases.extend(split_preserving_boundaries(
+                        phrase, max_tokens, original_split=lambda *_: [],
+                        count_tokens=count_tokens, text_capacity=text_capacity,
+                        thai_word_breaks=thai_word_breaks,
+                    ))
+                start = end
+            if _non_whitespace(phrases) != _non_whitespace([text]):
+                raise AssertionError("Thai phrase splitting changed source text")
+            return phrases
     thai_cuts = []
     thai_runs = list(_THAI_RUN.finditer(text))
     segmented_thai_runs = set()
@@ -281,6 +386,14 @@ def split_preserving_boundaries(
             risk, position = _risky_boundary(text, left, right, position)
             unsafe |= risk
     if not unsafe:
+        original = _preserve_long_sentence_groups(
+            text, original, preferred, count_tokens,
+            split_group=lambda value: split_preserving_boundaries(
+                value, max_tokens, original_split=original_split,
+                count_tokens=count_tokens, text_capacity=text_capacity,
+                thai_word_breaks=thai_word_breaks, language=language,
+            ),
+        )
         return _refine_long_mixed_chunks(original, count_tokens, text_capacity)
     if count_tokens(text) <= preferred:
         return _refine_long_mixed_chunks([text], count_tokens, text_capacity)

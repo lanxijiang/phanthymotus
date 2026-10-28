@@ -31,6 +31,9 @@ case "${MOSS_ENABLE:-0}" in
         # starting unrelated perception plugins in each benchmark container;
         # an operator can explicitly request the full service with value 0.
         export MOSS_TTS_ONLY="${MOSS_TTS_ONLY:-1}"
+        # The leaderboard receives complete PCM for scoring rather than live
+        # playback. Preserve paced delivery when an operator requests it.
+        export MOSS_TRANSPORT_MODE="${MOSS_TRANSPORT_MODE:-as_generated}"
         /usr/bin/python3 /work/tools/moss_runtime_config.py --moss-config "$config"
         export CONFIG_PATH="$config"
         model_dir="${MOSS_MODEL_DIR:-/models/moss-zh5-fp32-trt-runtime-20261028/assets}"

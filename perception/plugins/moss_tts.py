@@ -26,6 +26,22 @@ log = logging.getLogger(__name__)
 _DONE = object()
 
 
+def _memory_snapshot() -> dict:
+    """Observe process RSS and host availability; neither proves an OOM kill."""
+    values = {}
+    for source, field, label in (("/proc/self/status", "VmRSS:", "process_rss_kib"),
+                                 ("/proc/meminfo", "MemAvailable:", "host_available_kib")):
+        try:
+            with open(source, encoding="ascii") as stream:
+                for line in stream:
+                    if line.startswith(field):
+                        values[label] = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+    return values
+
+
 class _Cancelled(Exception):
     pass
 
@@ -33,7 +49,8 @@ class _Cancelled(Exception):
 class MossTTSAdapter:
     """TTSAdapter-compatible facade over independent in-process runtimes."""
 
-    dry_run_text = "你好。"
+    dry_run_text = "你好，我是你的机器人助手。"
+    LANGUAGES = ("zh", "ja", "ru", "en", "es", "fr", "th", "de")
     # Keep at most 1 s of PCM queued downstream. Including the browser's 200 ms
     # startup margin, this remains below its 1.5 s drop threshold. The generic
     # ROS publisher retains its cursor across consecutive utterances.
@@ -57,6 +74,10 @@ class MossTTSAdapter:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._lease_timeout_s = float(lease_timeout_s)
         self._config_lock = threading.Lock()
+        self._config_revision = 0
+        self._ready_lock = threading.Lock()
+        self._ready_revision = None
+        self._ready_bytes = 0
         self._lifecycle_lock = threading.Lock()
         self._active_requests = 0
         self._closed = False
@@ -150,34 +171,97 @@ class MossTTSAdapter:
 
     def validate_speaker_id(self, speaker_id: int) -> int:
         """Validate a cached built-in voice without changing any runtime state."""
+        return self._speaker_index(speaker_id, len(self._voices))
+
+    @staticmethod
+    def _speaker_index(speaker_id, voice_count: int) -> int:
         try:
             index = int(speaker_id)
         except (TypeError, ValueError, OverflowError) as error:
-            raise ValueError(f"MOSS speaker_id must be an integer in 0..{len(self._voices) - 1}") from error
+            raise ValueError(f"MOSS speaker_id must be an integer in 0..{voice_count - 1}") from error
         if (isinstance(speaker_id, bool)
                 or (not isinstance(speaker_id, str) and speaker_id != index)
-                or not 0 <= index < len(self._voices)):
-            raise ValueError(f"MOSS speaker_id must be an integer in 0..{len(self._voices) - 1}")
+                or not 0 <= index < voice_count):
+            raise ValueError(f"MOSS speaker_id must be an integer in 0..{voice_count - 1}")
         return index
+
+    @classmethod
+    def normalize_config(cls, cfg: dict, *, voice_count: int = 16) -> dict:
+        """Validate supported settings before changing caches or live voices."""
+        values = {}
+        if "speaker_id" in cfg:
+            values["speaker_id"] = cls._speaker_index(cfg["speaker_id"], voice_count)
+        if "speed" in cfg:
+            speed = float(cfg["speed"])
+            if speed != 1.0:
+                raise ValueError("MOSS has no validated speed control; use speed=1.0")
+            values["speed"] = speed
+        key = ("moss_language" if "moss_language" in cfg else
+               "tts_language" if cfg.get("tts_language") else None)
+        if key is not None:
+            language = str(cfg[key] or "auto").lower()
+            if language not in ("auto", *cls.LANGUAGES):
+                raise ValueError(f"Unsupported MOSS benchmark language: {cfg[key]}")
+            values["moss_language"] = language
+        if cfg.get("model_dir"):
+            values["model_dir"] = str(Path(cfg["model_dir"]).expanduser().resolve())
+        return values
+
+    def apply_config(self, cfg: dict) -> None:
+        """A request snapshots either the old or the new voice/language pair."""
+        values = self.normalize_config(cfg, voice_count=len(self._voices))
+        with self._config_lock:
+            previous = (self._voice, self._language)
+            if "speaker_id" in values:
+                self._voice = self._voices[values["speaker_id"]]
+            if "moss_language" in values:
+                self._language = values["moss_language"]
+            if (self._voice, self._language) != previous:
+                self._config_revision += 1
 
     def set_speaker_id(self, speaker_id: int) -> None:
         """Choose cached reference codes for subsequent requests; keep engines."""
         index = self.validate_speaker_id(speaker_id)
         with self._config_lock:
-            self._voice = self._voices[index]
+            if getattr(self, "_voice", None) != self._voices[index]:
+                self._voice = self._voices[index]
+                self._config_revision += 1
 
     def set_language(self, language: str) -> None:
-        normalized = str(language or "auto").lower()
-        if normalized not in {"auto", "zh", "ja", "ru", "en", "es", "fr", "th", "de"}:
-            raise ValueError(f"Unsupported MOSS benchmark language: {language}")
+        normalized = self.normalize_config({"moss_language": language})["moss_language"]
         with self._config_lock:
-            self._language = normalized
+            if self._language != normalized:
+                self._language = normalized
+                self._config_revision += 1
 
     def set_speed(self, speed: float) -> None:
         if float(speed) != 1.0:
             raise ValueError("MOSS has no validated speed control; use speed=1.0")
 
     def warmup(self) -> int:
+        return self.ensure_ready()
+
+    def ensure_ready(self) -> int:
+        """Reuse a complete successful probe instead of resampling at every start."""
+        with self._ready_lock:
+            with self._lifecycle_lock:
+                if self._closed:
+                    raise RuntimeError("MOSS adapter is closed")
+                with self._config_lock:
+                    revision = self._config_revision
+                    if self._ready_revision == revision:
+                        return self._ready_bytes
+            total_bytes = self._warmup_instances()
+            with self._lifecycle_lock:
+                if self._closed:
+                    raise RuntimeError("MOSS adapter is closed")
+                with self._config_lock:
+                    if self._config_revision != revision:
+                        raise RuntimeError("MOSS configuration changed during warmup; retry start")
+                    self._ready_revision, self._ready_bytes = revision, total_bytes
+            return total_bytes
+
+    def _warmup_instances(self) -> int:
         # Each completed synthesis returns its lease to the tail of _available.
         # At startup this visits every in-process runtime in turn, materializing
         # its lazy TensorRT contexts before the first scored request.
@@ -187,7 +271,7 @@ class MossTTSAdapter:
                 audio = self.synthesize(self.dry_run_text)
             except Exception as error:
                 raise RuntimeError(
-                    f"MOSS warmup failed for instance {index + 1}/{len(self._runtimes)}"
+                    f"MOSS warmup failed for instance {index + 1}/{len(self._runtimes)}: {error}"
                 ) from error
             if not audio or not any(audio):
                 raise RuntimeError(
@@ -218,6 +302,7 @@ class MossTTSAdapter:
         producer_started = False
         request_id = None
         admitted_at = time.monotonic()
+        memory_before = _memory_snapshot()
         timing = {"leased_at": None, "runtime_call_at": None, "first_pcm_at": None}
         timing_logged = False
 
@@ -313,7 +398,9 @@ class MossTTSAdapter:
                 item = audio_queue.get()
                 if item is _DONE:
                     if "error" in state:
-                        raise state["error"]
+                        # Do not leave the exception/traceback rooted in its
+                        # producer state after handing it to the caller.
+                        raise state.pop("error")
                     return
                 if not timing_logged:
                     log_first_audio("pcm")
@@ -327,6 +414,10 @@ class MossTTSAdapter:
                 self._release_runtime(runtime)
             if not timing_logged:
                 log_first_audio("no_pcm")
+            log.info("[moss] request_memory %s", json.dumps({
+                "request_id": request_id, "before": memory_before,
+                "after": _memory_snapshot(),
+            }, sort_keys=True))
 
     def _close_at_exit(self) -> None:
         self._exit_callback_running = True

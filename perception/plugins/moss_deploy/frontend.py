@@ -60,6 +60,7 @@ class MossFrontend:
             count_tokens=self.original.count_text_tokens,
             text_capacity=text_capacity,
             thai_word_breaks=thai_word_breaks,
+            language=resolved_language,
         )
         result = {"voice": voice, "language": resolved_language, "prepared_texts": prepared, "chunks": [{"text": chunk, "text_token_ids": self.encode_text(chunk)} for chunk in chunks], "prompt_templates": self.original.manifest["prompt_templates"], "reference_codes_source": "not loaded"}
         if codes is not None:

@@ -165,13 +165,15 @@ TOOLS = [
         "multiInstance": True,
         "description": "TTS — 把文本说出来（speak），或立即掐断正在说的话（interrupt）。"
                        "注意 stop 是停掉整个插件节点、不是停住这句话；"
-                       "要让机器人别说了用 interrupt。",
+                       "要让机器人别说了用 interrupt。"
+                       "support_language 返回当前引擎支持的语言代号。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["start", "stop", "speak", "info", "config", "interrupt"],
+                    "enum": ["start", "stop", "speak", "info", "config", "interrupt",
+                             "support_language"],
                     "description": "Action to perform"
                 },
                 "input_topic": {
@@ -182,8 +184,35 @@ TOOLS = [
                     "type": "string",
                     "description": "Text to synthesize (required for action=speak)"
                 },
+                # vits2-zh-en only; every other engine ignores it. A plain string,
+                # not an enum: the canvas debug panel preselects an enum's first
+                # value, which would force a reading on every test speak instead of auto.
+                "reading_language": {
+                    "type": "string",
+                    "description": "Optional, action=speak, vits2-zh-en only. Leave empty: "
+                                   "the default, auto, reads numbers, dates, units and "
+                                   "symbols to match the sentence around them, which is "
+                                   "right for normal replies. Set zh or en only when the "
+                                   "user explicitly asks for numbers to be read in that "
+                                   "language. Valid codes: action=support_language"
+                },
             },
             "required": ["action"],
+            # Which fields the canvas card shows per action, and the per-action
+            # tools agent-core presents to the LLM (tts__speak, tts__interrupt,
+            # tts__support_language — the same split G1/R1's tts uses). Nothing
+            # routing-related is listed: instance_id comes from the canvas
+            # binding, and a value the LLM made up would override it.
+            "x-action-params": {
+                "speak": {"params": ["text", "reading_language"], "required": ["text"],
+                          "description": "Say this text"},
+                "interrupt": {"params": [],
+                              "description": "Stop what is being said now and drop "
+                                             "anything queued"},
+                "support_language": {"params": [],
+                                     "description": "List the language codes the "
+                                                    "current engine can speak"},
+            },
             "x-completion": {
                 "actions": ["speak"],
                 "timeout": 60,
@@ -1420,8 +1449,12 @@ class _TTSNode(Node):
         # comes from the adapter, not a literal here — see TTSAdapter.dry_run_text.
         probe = getattr(self._adapter, "dry_run_text", ".")
         try:
-            test_chunks = list(self._adapter.synthesize_stream(probe))
-            if not test_chunks:
+            ensure_ready = getattr(self._adapter, "ensure_ready", None)
+            if ensure_ready is not None:
+                has_audio = bool(ensure_ready())
+            else:
+                has_audio = bool(list(self._adapter.synthesize_stream(probe)))
+            if not has_audio:
                 return {"state": "error",
                         "message": f"TTS dry-run produced no audio for {probe!r}"}
         except Exception as e:
@@ -1853,6 +1886,8 @@ class SherpaOnnxTTSPlugin:
 
     def __init__(self, plugin_cfg: dict, executor):
         self._cfg      = plugin_cfg
+        self._moss_config_lock = threading.Lock()
+        self._moss_disposed = False
         # Normalise the session keys up front so the first `config` that repeats
         # them compares equal instead of rebuilding what was just built.
         self._cfg.update(_session_keys(plugin_cfg))
@@ -1931,6 +1966,56 @@ class SherpaOnnxTTSPlugin:
     def get_tools(self) -> list:
         return TOOLS
 
+    def _config_moss(self, cfg: dict) -> dict:
+        """Apply MOSS settings without reusing sherpa's session rebuild rules."""
+        from pathlib import Path
+        from plugins.moss_tts import MossTTSAdapter
+
+        with self._moss_config_lock:
+            if self._moss_disposed:
+                raise RuntimeError("MOSS TTS implementation is shut down")
+            adapter = self._adapter
+            values = MossTTSAdapter.normalize_config(
+                cfg, voice_count=len(adapter._voices) if adapter is not None else 16)
+            candidate = {**self._cfg, **values}
+            old_dir = str(Path(self._cfg.get("model_dir") or
+                               ENGINE_MODEL_DIRS["moss-multi"]).expanduser().resolve())
+            rebuild = (adapter is None or getattr(adapter, "_closed", False)
+                       or values.get("model_dir", old_dir) != old_dir)
+            if not rebuild:
+                adapter.apply_config(values)
+                self._cfg.update(values)
+                self._load_error = None
+                return {"status": "configured", "rebuilt": False}
+
+            # Device and other engines' options never reach this path. For an
+            # actual model replacement, stop every old producer and release the
+            # pool before allocating its replacement. A failed close aborts the
+            # replacement and leaves the old adapter reachable for retry.
+            with self._nodes_lock:
+                self._loading = True
+                nodes = list(self._nodes.items())
+                self._nodes.clear()
+            try:
+                for key, node in nodes:
+                    self._dispose_node(node, key)
+                if adapter is not None:
+                    adapter.close()
+                    self._adapter = None
+                replacement = _build_tts_adapter(
+                    candidate,
+                    on_status=lambda text: setattr(self, "_load_status", text))
+                self._adapter = replacement
+                self._cfg.update(values)
+                self._load_error = None
+                return {"status": "configured", "rebuilt": True}
+            except Exception as error:
+                self._load_error = str(error)
+                raise
+            finally:
+                self._loading = False
+                self._load_status = None
+
     def dispatch(self, name: str, args: dict) -> dict | None:
         action = args.get("action") if name == "tts" else name
         instance_id = args.get("instance_id", "")
@@ -2003,6 +2088,10 @@ class SherpaOnnxTTSPlugin:
             input_topic = args.get("input_topic") or ''
             node_key = instance_id or input_topic or '_default'
             with self._nodes_lock:
+                if self._cfg.get("engine") == "moss-multi" and self._loading:
+                    return {"state": "loading", "message": "MOSS model is being replaced"}
+                if self._cfg.get("engine") == "moss-multi" and (self._load_error or self._adapter is None):
+                    return {"state": "error", "message": self._load_error or "MOSS model not loaded"}
                 # Clean up _default node if it would conflict with this instance
                 if '_default' in self._nodes and node_key != '_default':
                     default_node = self._nodes['_default']
@@ -2023,6 +2112,9 @@ class SherpaOnnxTTSPlugin:
                                     node_suffix=node_key.replace('/', '_').replace('-', '_'))
                     self._executor.add_node(node)
                     self._nodes[node_key] = node
+                if self._cfg.get("engine") == "moss-multi" and node.state == "running":
+                    # Repeated starts must preserve MOSS speech already queued.
+                    return node._status_dict()
                 return node.start()
 
         elif action == "stop":
@@ -2052,6 +2144,10 @@ class SherpaOnnxTTSPlugin:
                 # node would prevent three MOSS inference instances from running.
                 # Calls without an instance_id retain the legacy reuse behaviour.
                 with self._nodes_lock:
+                    if self._loading:
+                        return {"state": "loading", "message": "MOSS model is being replaced"}
+                    if self._load_error or self._adapter is None:
+                        return {"state": "error", "message": self._load_error or "MOSS model not loaded"}
                     node_key = instance_id or '_default'
                     node = self._nodes.get(instance_id) if instance_id else None
                     if not instance_id:
@@ -2076,7 +2172,10 @@ class SherpaOnnxTTSPlugin:
                             self._executor.add_node(node)
                             self._nodes[node_key] = node
                     if node.state != "running":
-                        node.start()
+                        started = node.start()
+                        if started.get("state") != "running":
+                            raise RuntimeError(started.get("message")
+                                               or "MOSS TTS node failed to start")
             else:
                 # Find any existing running node to reuse
                 with self._nodes_lock:
@@ -2111,6 +2210,8 @@ class SherpaOnnxTTSPlugin:
             return {"status": "queued", "action_id": action_id, "text": text}
 
         elif action == "config":
+            if self._cfg.get("engine") == "moss-multi":
+                return self._config_moss(args)
             # No `and v` filter here. It used to drop every falsy value, which made
             # `thai_phrase_spacing: False` and `speaker_id: 0` unsendable — you
             # could turn phrase spacing on and never off. _session_keys() decides
@@ -2142,26 +2243,10 @@ class SherpaOnnxTTSPlugin:
             # dashboard would differ from a stored `1.0` and defeat the check.
             incoming = _session_keys(cfg)
             speed = float(cfg['speed']) if 'speed' in cfg else None
-            language_key = ('moss_language' if self._cfg.get('engine') == 'moss-multi' and cfg.get('moss_language')
-                            else 'tts_language' if cfg.get('tts_language') else None)
+            language_key = 'tts_language' if cfg.get('tts_language') else None
             language = str(cfg[language_key]) if language_key else None
-
-            # MOSS built-in speakers are already verified cached reference
-            # codes. Selecting one must not allocate another TensorRT pool.
-            # Keep speaker_id a session key for every other engine.
-            speaker_setter = (getattr(self._adapter, "set_speaker_id", None)
-                              if self._cfg.get("engine") == "moss-multi" else None)
-            cheap_speaker = callable(speaker_setter) and 'speaker_id' in cfg
-            if cheap_speaker:
-                validator = getattr(self._adapter, "validate_speaker_id", None)
-                if callable(validator):
-                    validator(cfg['speaker_id'])
             needs_rebuild = any(self._cfg.get(key) != value
-                                for key, value in incoming.items()
-                                if not (cheap_speaker and key == 'speaker_id'))
-            if cheap_speaker and not needs_rebuild:
-                # Validation/setter failures leave the persisted config intact.
-                speaker_setter(cfg['speaker_id'])
+                                for key, value in incoming.items())
             self._cfg.update(incoming)
             # Both of these have to be written back explicitly, because they are
             # absent from `incoming` by design and _build_tts_adapter reads them out
@@ -2241,6 +2326,18 @@ DEFAULT_TTS_ENGINE = "vits2-zh-en"
 #
 # Language codes, not country codes: `zh`, not `cn`.
 TTS_ENGINES = ("vits2-zh-en", "matcha-zh-en", "mms-th", "kokoro-multi", "moss-multi")
+# What each engine can speak, in the codes the rest of this file uses. Answered
+# by action=support_language straight from the facade: it is a property of the
+# engine, not of a loaded model, so it works while an engine is still loading.
+# For vits2-zh-en these are also the values speak's reading_language accepts
+# besides "auto"; kokoro-multi's are its tts_language setting.
+ENGINE_LANGUAGES = {
+    "vits2-zh-en": ("zh", "en"),
+    "matcha-zh-en": ("zh", "en"),
+    "mms-th": ("th",),
+    "kokoro-multi": KokoroTTSAdapter.LANGUAGES,
+    "moss-multi": ("zh", "ja", "ru", "en", "es", "fr", "th", "de"),
+}
 # Older spellings, still accepted. `vits2_trt` and `sherpa_onnx` are not
 # decoration: both are already persisted in ConfigDB rows and in config.yaml on
 # every deployed robot, and _select_engine raises on an unknown engine — so
@@ -2324,6 +2421,7 @@ class TTSPlugin:
         self._build_error = None
         self._moss_shutdown = False
         self._moss_shutdown_impl = None
+        self._moss_config_lock = threading.Lock()
         # `start` calls that arrived while a build was in flight, keyed by
         # instance_id, replayed against the new engine once it is resident. Agent
         # Core's contract for a start that answers `state: loading` is that the
@@ -2493,6 +2591,10 @@ class TTSPlugin:
         action = args.get("action") if name == "tts" else name
         if action == "config":
             return self._config(name, args)
+        if action == "support_language":
+            with self._lock:
+                engine = self._engine
+            return {"engine": engine, "languages": list(ENGINE_LANGUAGES[engine])}
 
         with self._lock:
             if self._moss_shutdown:
@@ -2582,24 +2684,87 @@ class TTSPlugin:
                 return False, None
             time.sleep(0.2)
 
+    def _moss_loading_config(self, args: dict) -> dict | None:
+        """Do not acknowledge settings the in-flight MOSS build cannot apply."""
+        with self._lock:
+            if self._building != "moss-multi" or self._impl is not None:
+                return None
+            from plugins.moss_tts import MossTTSAdapter
+
+            values = MossTTSAdapter.normalize_config(args)
+            current = MossTTSAdapter.normalize_config({
+                "speaker_id": self._cfg.get("speaker_id", 0),
+                "speed": self._cfg.get("speed", 1.0),
+                "moss_language": self._cfg.get("moss_language") or "auto",
+                "model_dir": self._model_dir_for("moss-multi"),
+            })
+            requested = args.get("tts_engine") or args.get("engine")
+            changed = (self._select_engine(requested or self._engine) != "moss-multi"
+                       or any(value != current[key] for key, value in values.items()))
+            if changed:
+                return {"status": "error", "state": "loading", "engine": "moss-multi",
+                        "retryable": True,
+                        "message": "MOSS is loading; retry configuration changes after it is ready"}
+            return {"status": "configured", "state": "loading", "engine": "moss-multi"}
+
     def _config(self, name: str, args: dict) -> dict:
+        # Check before the config lock: the first switch may still be waiting
+        # for its build, but repeated/empty config calls must return promptly.
+        loading = self._moss_loading_config(args)
+        if loading is not None:
+            return loading
+        requested = args.get("tts_engine") or args.get("engine")
+        target_is_moss = str(requested or self._engine).strip().lower().replace("_", "-") == "moss-multi"
+        if target_is_moss or self._impl_engine == "moss-multi":
+            # Serialize MOSS updates and departures with their cache commits.
+            # Other engines retain the original validation order below.
+            with self._moss_config_lock:
+                loading = self._moss_loading_config(args)
+                if loading is not None:
+                    return loading
+                if target_is_moss:
+                    from plugins.moss_tts import MossTTSAdapter
+
+                    values = MossTTSAdapter.normalize_config(args)
+                    args = {**args, **values}
+                return self._apply_config(name, args)
+        return self._apply_config(name, args)
+
+    def _apply_config(self, name: str, args: dict) -> dict:
         """Apply shared config, switching engines when tts_engine changes."""
         if self._moss_shutdown:
             return {"status": "error", "state": "error", "message": "MOSS TTS plugin is shut down"}
         requested = args.get("tts_engine") or args.get("engine")
         forwarded = {k: v for k, v in args.items()
                      if k not in ("tts_engine", "engine")}
-        # The facade also persists shared fields. Validate a resident MOSS
-        # speaker before either config dictionary can record an invalid value.
-        # Other engines and actual engine switches keep their existing path.
-        if 'speaker_id' in args:
-            with self._lock:
-                same_moss = (self._engine == "moss-multi"
-                             and (not requested or self._select_engine(requested) == "moss-multi"))
-                adapter = getattr(self._impl, "_adapter", None) if same_moss else None
-                validator = getattr(adapter, "validate_speaker_id", None)
-                if callable(getattr(adapter, "set_speaker_id", None)) and callable(validator):
-                    validator(args['speaker_id'])
+        with self._lock:
+            same_moss = (self._engine == "moss-multi" and self._impl is not None
+                         and (not requested or self._select_engine(requested) == "moss-multi"))
+            moss_impl = self._impl if same_moss else None
+            departing_moss = (self._impl if requested and not same_moss
+                              and self._impl_engine == "moss-multi" else None)
+        if moss_impl is not None:
+            # Failed validation, teardown or rebuilding must not persist a
+            # setting that the implementation did not accept.
+            result = moss_impl.dispatch(name, {**forwarded, "action": "config"})
+            if not isinstance(result, dict) or result.get("status") != "configured":
+                return result
+            for key in SHARED_CONFIG_KEYS:
+                if key in args:
+                    self._cfg[key] = args[key]
+            result.setdefault("engine", "moss-multi")
+            return result
+        if departing_moss is not None:
+            # Keep the old implementation and cache reachable until release
+            # succeeds. Never allocate the next engine after a failed close.
+            departing_moss._loading = True
+            try:
+                _dispose_impl(departing_moss, raise_close_error=True)
+            except Exception as error:
+                departing_moss._load_error = f"MOSS shutdown failed: {error}"
+                raise
+            finally:
+                departing_moss._loading = False
         for key in SHARED_CONFIG_KEYS:
             if key in args:
                 self._cfg[key] = args[key]
@@ -2623,7 +2788,7 @@ class TTSPlugin:
                 # Stop the old engine's nodes before the new one publishes on
                 # the same topics — two live TTS publishers on one topic is the
                 # duplicate-audio failure mode in README § Plugin Concurrency.
-                if outgoing is not None:
+                if outgoing is not None and outgoing is not departing_moss:
                     _dispose_impl(outgoing)
                 self._build_async(engine)
                 log.info("[tts] switching engine to %s", engine)
@@ -2662,7 +2827,12 @@ class TTSPlugin:
                 return {"status": "error", "state": "error", "message": "MOSS TTS plugin is shut down"}
             impl = self._impl
             engine = self._engine
+            load_error = (self._build_error if engine == "moss-multi"
+                          and not self._building else None)
         if impl is None:
+            if load_error:
+                return {"status": "error", "state": "error", "engine": engine,
+                        "message": load_error}
             return {"status": "configured", "state": "loading", "engine": engine}
         result = impl.dispatch(name, {**forwarded, "action": "config"})
         if isinstance(result, dict):
@@ -2684,6 +2854,15 @@ class TTSPlugin:
 
 def _dispose_impl(impl, *, raise_close_error: bool = False) -> None:
     """Stop every node an engine implementation owns before dropping it."""
+    lock = getattr(impl, "_moss_config_lock", None)
+    if lock is not None and getattr(impl, "_cfg", {}).get("engine") == "moss-multi":
+        with lock:
+            impl._moss_disposed = True
+            return _dispose_impl_unlocked(impl, raise_close_error=raise_close_error)
+    return _dispose_impl_unlocked(impl, raise_close_error=raise_close_error)
+
+
+def _dispose_impl_unlocked(impl, *, raise_close_error: bool = False) -> None:
     try:
         impl.dispatch("tts", {"action": "stop"})
     except Exception:

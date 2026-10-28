@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import threading
@@ -18,7 +19,7 @@ from .assets import load_original_prompting, load_original_source
 from .chunking import prompt_text_capacity, split_preserving_boundaries
 from .thai import thai_word_breaks
 from .completeness import (generate_with_early_eos_guard, minimum_chunk_frames,
-                           validate_chunk_result)
+                           validate_chunk_result, IncompleteSynthesisError)
 from .si_units import prepare_with_request_language, resolve_request_language
 from .pool import SessionAdapter, SharedGraphPool
 from .selected_logits import SelectedAudioScores, wrap_selected_outputs
@@ -342,6 +343,7 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 count_tokens=self.count_text_tokens,
                 text_capacity=capacity,
                 thai_word_breaks=thai_word_breaks,
+                language=self._request_normalization_language,
             )
             log.info("[moss] split chars=%d chunks=%d tokens=%s preferred=%d capacity=%d",
                      len(text), len(chunks), [self.count_text_tokens(chunk) for chunk in chunks],
@@ -388,6 +390,7 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 pause = self.estimate_voice_clone_inter_chunk_pause_seconds(self._previous_stream_chunk_text)
                 self._request_audio_callback(np.zeros((round(48000 * pause), 2), dtype=np.float32))
             self._chunk_minimum_frames = minimum_chunk_frames(text)
+            rng_before = copy.deepcopy(self.rng.bit_generator.state)
             try:
                 result = super().synthesize_single_chunk(text=text, prompt_audio_codes=prompt_audio_codes, streaming=streaming)
             finally:
@@ -396,9 +399,63 @@ def _create_original_adapter_class(pool: SharedGraphPool):
             log.info("[moss] chunk chars=%d text_tokens=%s generated_frames=%d frame_limit=%s",
                      len(text), None if token_ids is None else len(token_ids), len(result["generated_frames"]),
                      self.manifest["generation_defaults"].get("max_new_frames"))
-            validate_chunk_result(result, self.manifest["generation_defaults"], text=text)
+            try:
+                validate_chunk_result(result, self.manifest["generation_defaults"], text=text)
+            except IncompleteSynthesisError:
+                log.error("[moss] incomplete_chunk %s", json.dumps({
+                    "instance_id": self.instance_id, "text": text,
+                    "language": self._request_normalization_language,
+                    "rng_before": rng_before,
+                    "generation_defaults": self.manifest["generation_defaults"],
+                    "reference_frames": len(prompt_audio_codes),
+                }, ensure_ascii=False, sort_keys=True))
+                raise
             self._previous_stream_chunk_text = text
             return result
+
+        def synthesize_callback_only(
+            self, *, text, voice=None, prompt_audio_path=None,
+            output_audio_path=None, sample_mode=None, do_sample=True,
+            streaming=True, max_new_frames=None, voice_clone_max_text_tokens=75,
+            enable_wetext=True, enable_normalize_tts_text=True, seed=None,
+        ):
+            """Deliver original chunk audio without retaining a request waveform.
+
+            Callback delivery owns the audio. Keep text/token metadata, but
+            avoid the original request-wide waveform copy and throwaway WAV.
+            Normal synthesize() retains the original file-producing behavior.
+            """
+            if self._request_audio_callback is None or not streaming:
+                raise ValueError("Callback-only synthesis requires streaming and an audio callback")
+            defaults = self.manifest["generation_defaults"]
+            if max_new_frames is not None:
+                defaults["max_new_frames"] = int(max_new_frames)
+            mode = original._normalize_sample_mode(sample_mode, do_sample)
+            defaults.update(sample_mode=mode, do_sample=mode != original.SAMPLE_MODE_GREEDY)
+            if seed is not None:
+                self.rng = np.random.default_rng(int(seed))
+            prepared = self.prepare_synthesis_text(
+                text=text, voice=str(voice or ""), enable_wetext=enable_wetext,
+                enable_normalize_tts_text=enable_normalize_tts_text,
+            )
+            codes = self.resolve_prompt_audio_codes(voice=voice, prompt_audio_path=prompt_audio_path)
+            chunks = self.split_voice_clone_text(str(prepared["text"]), max_tokens=int(voice_clone_max_text_tokens))
+            sample_rate = int(self.codec_meta["codec_config"]["sample_rate"])
+            frames, results, samples = [], [], 0
+            for index, chunk in enumerate(chunks):
+                result = self.synthesize_single_chunk(text=chunk, prompt_audio_codes=codes, streaming=True)
+                count = len(result["waveform"])
+                frames.extend(result["generated_frames"])
+                results.append({**result, "waveform": None, "audio_samples": count})
+                samples += count
+                if index < len(chunks) - 1:
+                    samples += max(0, int(round(sample_rate * self.estimate_voice_clone_inter_chunk_pause_seconds(chunk))))
+                del result
+            return {"audio_path": None, "waveform": None, "sample_rate": sample_rate,
+                    "audio_samples": samples, "audio_token_ids": np.asarray(frames, dtype=np.int32),
+                    "text_chunks": chunks, "prepared_texts": prepared, "sample_mode": mode,
+                    "do_sample": mode != original.SAMPLE_MODE_GREEDY, "streaming": True,
+                    "callback_only": True, "chunk_results": results}
 
     if use_fast_sampling:
         from .sampling import make_fast_generation_method
@@ -495,7 +552,7 @@ class MossRuntime:
             self._runtime._previous_stream_chunk_text = None
             self._runtime._request_normalization_language = language
             try:
-                result = self._runtime.synthesize(streaming=True, **kwargs)
+                result = self._runtime.synthesize_callback_only(streaming=True, **kwargs)
                 result["language"] = language
                 return result
             finally:
