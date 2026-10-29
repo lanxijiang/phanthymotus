@@ -44,6 +44,29 @@ def _structured_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def complete_chunk_text(text: str, language: str | None = None) -> str:
+    """Close an independently generated utterance, retaining its spoken words.
+
+    The source splitter can return an unfinished clause. A comma/semicolon is
+    not an utterance-end cue for the acoustic model. This is model input only;
+    callers retain the original text for chunk ordering and diagnostics.
+    """
+    value = text.rstrip()
+    core = value.rstrip("\"'”’)]}）】》」』»›")
+    if not core or core[-1] in ".!?。！？…":
+        return text
+    # An address/version ending in digits or letters must not acquire another
+    # spoken dot. Preserve the existing structured-text path unchanged.
+    if any(end == len(core) for _begin, end in _structured_spans(core)):
+        return text
+    stop = "。" if language in {"zh", "ja"} else "."
+    ending = value[len(core):]
+    core = core.rstrip(",;:，；：")
+    if not core or not any(character.isalnum() for character in core):
+        return text
+    return core + stop + ending
+
+
 def prompt_text_capacity(runtime, reference_codes: list[list[int]], prefill_max: int) -> int:
     """Maximum text tokens admitted by this export's global prefill profile."""
     fixed_rows = len(runtime.build_voice_clone_request_rows(reference_codes, [])["inputIds"])

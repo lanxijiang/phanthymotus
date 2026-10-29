@@ -365,12 +365,20 @@ class MossTTSAdapter:
             def produce() -> None:
                 try:
                     timing["runtime_call_at"] = time.monotonic()
-                    runtime.synthesize_stream(
+                    result = runtime.synthesize_stream(
                         on_audio=on_audio, text=text, voice=voice,
                         language=language, sample_mode="full", do_sample=True,
                         max_new_frames=375, voice_clone_max_text_tokens=75,
                         enable_wetext=True, output_audio_path=output_path,
                     )
+                    if not result["complete"]:
+                        log.warning("[moss] partial_audio %s", json.dumps({
+                            "request_id": request_id,
+                            "runtime_id": runtime.instance_id,
+                            "language": result["language"],
+                            "complete": False,
+                            "incomplete_chunks": result["incomplete_chunks"],
+                        }, sort_keys=True))
                     if not state["pcm_bytes"]:
                         raise RuntimeError("MOSS synthesis returned no PCM for nonempty text")
                 except _Cancelled:

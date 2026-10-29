@@ -16,7 +16,7 @@ import numpy as np
 import sentencepiece as spm
 
 from .assets import load_original_prompting, load_original_source
-from .chunking import prompt_text_capacity, split_preserving_boundaries
+from .chunking import complete_chunk_text, prompt_text_capacity, split_preserving_boundaries
 from .thai import thai_word_breaks
 from .completeness import (generate_with_early_eos_guard, minimum_chunk_frames,
                            validate_chunk_result, IncompleteSynthesisError)
@@ -39,6 +39,7 @@ GENERATION_DEFAULTS = {
     "audio_top_p": 0.95,
     "audio_top_k": 25,
     "audio_repetition_penalty": 1.2,
+    "eos_stopping": "sampled",
 }
 
 
@@ -54,6 +55,8 @@ def _validate_frame_sampling(defaults, contract):
                   if key not in expected or defaults.get(key) != expected[key]]
     if defaults.get("sample_mode") != "full" or defaults.get("do_sample") is not True:
         mismatches.append("sample_mode=full/do_sample=True")
+    if defaults.get("eos_stopping", "sampled") not in {"sampled", "sampled_or_majority"}:
+        mismatches.append("eos_stopping")
     if mismatches:
         raise ValueError("Fused frame sampling does not match its validated contract: "
                          + ", ".join(mismatches))
@@ -124,6 +127,16 @@ def _run_sampled_frame(runtime, global_hidden, *, previous_token_sets_by_channel
         if not np.isin(continuation, [0, 1]).all() or np.any(tokens < 0) or np.any(tokens >= 1024):
             raise ValueError("Fused frame returned out-of-range continuation or audio tokens")
         should_continue = bool(continuation[0, 0])
+        if runtime.manifest["generation_defaults"].get("eos_stopping", "sampled") == "sampled_or_majority":
+            # Keep every sampled EOS. Also stop when the model's own EOS
+            # score exceeds its continuation score: a random continuation
+            # must not skip this end cue and launch another spoken copy.
+            # Audio sampling/conditioning stays inside the verified graph;
+            # never reuse an EOS-conditioned frame to force continuation.
+            scores = np.asarray(named["text_logits"])
+            if scores.shape != (1, 2) or not np.isfinite(scores).all():
+                raise ValueError("Fused frame returned invalid assistant/EOS scores")
+            should_continue = should_continue and bool(scores[0, 0] >= scores[0, 1])
         if not should_continue:
             runtime.rng.bit_generator.state = after_assistant
         return should_continue, [int(token) for token in tokens[0]]
@@ -168,6 +181,9 @@ def _create_original_adapter_class(pool: SharedGraphPool):
         fused_frame_enabled = frame_contract is not None
 
         def __init__(self, instance_id: str, seed: int, output_dir: Path):
+            self._thai_frame_limit_policy = os.environ.get("MOSS_THAI_FRAME_LIMIT_POLICY", "continue")
+            if self._thai_frame_limit_policy not in {"error", "continue"}:
+                raise ValueError("MOSS_THAI_FRAME_LIMIT_POLICY must be error or continue")
             # Intentionally bypass the upstream constructor's browser asset
             # downloader and its incompatible split graph session factory.
             self.model_dir = assets.analysis_path.parent
@@ -199,6 +215,8 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 "builtin_voices": [{"voice": voice, "description": row[1]} for voice, row in assets.voice_files.items()],
                 "text_samples": [],
             }
+            if frame_contract is not None:
+                self.manifest["generation_defaults"]["eos_stopping"] = "sampled_or_majority"
             model = self.tts_meta["model_config"]
             global_outputs = ["global_hidden"] + [name for layer in range(int(model["global_layers"])) for name in (f"present_key_{layer}", f"present_value_{layer}")]
             global_past = [name.replace("present_", "past_") for name in global_outputs[1:]]
@@ -390,26 +408,50 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 pause = self.estimate_voice_clone_inter_chunk_pause_seconds(self._previous_stream_chunk_text)
                 self._request_audio_callback(np.zeros((round(48000 * pause), 2), dtype=np.float32))
             self._chunk_minimum_frames = minimum_chunk_frames(text)
+            model_text = complete_chunk_text(text, self._request_normalization_language)
+            if model_text != text:
+                prefill_max = int(assets.graphs["global_unified"]["profiles"]["input_ids"]["max"][1])
+                if self.count_text_tokens(model_text) > prompt_text_capacity(self, prompt_audio_codes, prefill_max):
+                    model_text = text
             rng_before = copy.deepcopy(self.rng.bit_generator.state)
             try:
-                result = super().synthesize_single_chunk(text=text, prompt_audio_codes=prompt_audio_codes, streaming=streaming)
+                result = super().synthesize_single_chunk(text=model_text, prompt_audio_codes=prompt_audio_codes, streaming=streaming)
             finally:
                 self._chunk_minimum_frames = 1
+            result["source_text"] = text
+            result["model_text"] = model_text
             token_ids = result.get("text_token_ids")
             log.info("[moss] chunk chars=%d text_tokens=%s generated_frames=%d frame_limit=%s",
                      len(text), None if token_ids is None else len(token_ids), len(result["generated_frames"]),
                      self.manifest["generation_defaults"].get("max_new_frames"))
             try:
                 validate_chunk_result(result, self.manifest["generation_defaults"], text=text)
-            except IncompleteSynthesisError:
-                log.error("[moss] incomplete_chunk %s", json.dumps({
+            except IncompleteSynthesisError as error:
+                # Retain bounded Thai audio and continue later chunks unless
+                # strict validation was explicitly requested. This remains
+                # incomplete audio, not a natural EOS or quality acceptance.
+                continued = (error.reason == "frame_limit"
+                             and self._request_normalization_language == "th"
+                             and self._thai_frame_limit_policy == "continue"
+                             and streaming and self._request_audio_callback is not None
+                             and len(result["generated_frames"]) == error.limit
+                             and result.get("waveform") is not None
+                             and len(result["waveform"]) > 0)
+                emit = log.warning if continued else log.error
+                emit("[moss] incomplete_chunk %s", json.dumps({
                     "instance_id": self.instance_id, "text": text,
+                    "model_text": model_text,
                     "language": self._request_normalization_language,
+                    "reason": error.reason, "continued": continued,
                     "rng_before": rng_before,
                     "generation_defaults": self.manifest["generation_defaults"],
                     "reference_frames": len(prompt_audio_codes),
                 }, ensure_ascii=False, sort_keys=True))
-                raise
+                if not continued:
+                    raise
+                result["finish_reason"] = "frame_limit"
+            else:
+                result["finish_reason"] = "eos"
             self._previous_stream_chunk_text = text
             return result
 
@@ -451,11 +493,14 @@ def _create_original_adapter_class(pool: SharedGraphPool):
                 if index < len(chunks) - 1:
                     samples += max(0, int(round(sample_rate * self.estimate_voice_clone_inter_chunk_pause_seconds(chunk))))
                 del result
+            incomplete_chunks = [index for index, chunk in enumerate(results)
+                                 if chunk["finish_reason"] != "eos"]
             return {"audio_path": None, "waveform": None, "sample_rate": sample_rate,
                     "audio_samples": samples, "audio_token_ids": np.asarray(frames, dtype=np.int32),
                     "text_chunks": chunks, "prepared_texts": prepared, "sample_mode": mode,
                     "do_sample": mode != original.SAMPLE_MODE_GREEDY, "streaming": True,
-                    "callback_only": True, "chunk_results": results}
+                    "callback_only": True, "chunk_results": results,
+                    "complete": not incomplete_chunks, "incomplete_chunks": incomplete_chunks}
 
     if use_fast_sampling:
         from .sampling import make_fast_generation_method
