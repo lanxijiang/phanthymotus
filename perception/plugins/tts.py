@@ -1340,6 +1340,15 @@ def _validate_kokoro_manifest(model_dir: str) -> dict:
     return manifest
 
 
+_KOKORO_MULTI_LANGUAGES = ("zh", "en", "ja", "ru", "de", "fr", "es", "th")
+
+
+def _is_kokoro_multi_backend(engine, backend, configured_engine=None):
+    """A backend setting applies only to the engine it was configured for."""
+    return (engine == 'kokoro-multi' and str(backend).lower() == 'trt'
+            and configured_engine in (None, engine))
+
+
 def _build_tts_adapter(cfg: dict, on_status=None) -> TTSAdapter:
     import os
     from utils.onnx_provider import normalize_device
@@ -1355,6 +1364,12 @@ def _build_tts_adapter(cfg: dict, on_status=None) -> TTSAdapter:
         cfg.get('device') or ENGINE_DEVICE_DEFAULTS.get(engine),
         cfg.get('hw_provider'),
     )
+    if _is_kokoro_multi_backend(engine, cfg.get('backend')):
+        from plugins.kokoro_multi_tts import KokoroMultiTTSAdapter
+        return KokoroMultiTTSAdapter(
+            model_dir, speaker_id, speed, device,
+            language=cfg.get('tts_language') or cfg.get('language') or 'auto',
+            on_status=on_status)
     if engine == 'mms-th':
         return MmsThaiTTSAdapter(
             model_dir, speaker_id, speed, device,
@@ -1610,7 +1625,8 @@ class _TTSNode(Node):
                 # 分段：超过 280 字按标点切分，避免超长合成导致延迟或失败。分段是
                 # 合成的实现细节 —— pacing/prebuffer/EOF 都跨段延续，下游看到的
                 # 仍然是一句完整的话。
-                segments = self._split_text(text, max_chars=280)
+                segments = ([text] if getattr(self._adapter, "handles_text_chunking", False)
+                            else self._split_text(text, max_chars=280))
                 if len(segments) > 1:
                     log.info(f"[tts] split {len(text)} chars into {len(segments)} segments")
 
@@ -2309,6 +2325,10 @@ class TTSPlugin:
         cfg = dict(self._cfg)
         cfg["engine"] = engine
         cfg["model_dir"] = self._model_dir_for(engine)
+        # Like model_dir, a configured backend belongs to its original engine.
+        # VITS2's backend=trt must not select Kokoro Multi after a switch to Kokoro.
+        if engine != self._configured_engine:
+            cfg.pop("backend", None)
         impl = (self._build_vits2(cfg) if engine == "vits2-zh-en"
                 else SherpaOnnxTTSPlugin(cfg, self._executor))
         # An implementation may swallow its own model-load failure and come back
@@ -2386,7 +2406,23 @@ class TTSPlugin:
         threading.Thread(target=_run, name=f"tts-engine-{engine}", daemon=True).start()
 
     def get_tools(self) -> list:
-        return TOOLS
+        with self._lock:
+            kokoro_trt = _is_kokoro_multi_backend(
+                self._engine, self._cfg.get("backend"), self._configured_engine)
+        if not kokoro_trt:
+            return TOOLS
+        from copy import deepcopy
+        tools = deepcopy(TOOLS)
+        props = tools[0]["configSchema"]["properties"]
+        props["tts_language"].update(
+            enum=["auto", *_KOKORO_MULTI_LANGUAGES], default="auto",
+            description="Kokoro Multi pronunciation language; auto detects each utterance")
+        props["speaker_id"]["description"] = (
+            "Kokoro Multi supports speaker_id 0 only; voices come from the pinned release")
+        props["device"].update(
+            enum=["gpu"], default="gpu",
+            description="Kokoro Multi FP32 TensorRT runs on GPU")
+        return tools
 
     # ── dispatch ────────────────────────────────────────────────────────
 
@@ -2397,6 +2433,10 @@ class TTSPlugin:
         if action == "support_language":
             with self._lock:
                 engine = self._engine
+                kokoro_trt = _is_kokoro_multi_backend(
+                    engine, self._cfg.get("backend"), self._configured_engine)
+            if kokoro_trt:
+                return {"engine": engine, "languages": list(_KOKORO_MULTI_LANGUAGES)}
             return {"engine": engine, "languages": list(ENGINE_LANGUAGES[engine])}
 
         with self._lock:

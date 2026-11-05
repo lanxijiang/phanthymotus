@@ -1,0 +1,18 @@
+# JP6 / Python 3.10 frontend only. TRT, CUDA and Torch stay image-owned.
+# Frontend model/dictionary assets travel in the external verified release.
+numpy==1.26.4
+misaki==0.9.4
+spacy==3.7.5
+phonemizer-fork==3.3.2
+espeakng-loader==0.2.4
+num2words==0.5.14
+pypinyin==0.55.0
+cn2an==0.5.24
+jieba==0.42.1
+ordered-set==4.1.0
+fugashi==1.5.2
+unidic-lite==1.0.8
+jaconv==0.5.0
+mojimoji==0.0.13
+pythainlp==5.3.4
+langid==1.1.6

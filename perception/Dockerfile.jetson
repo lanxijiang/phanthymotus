@@ -694,9 +694,21 @@ ENV PYTHONUNBUFFERED=1
 # exactly the "garbage characters" that make `docker logs` unreadable.
 ENV RCUTILS_COLORIZED_OUTPUT=0
 
+# Dedicated Kokoro Multi submission layer. Default-on only for JP6; setting
+# KOKORO_MULTI_ENABLE=0 retains the official configuration and main module.
+# No weights are baked in: the entrypoint verifies a pinned runtime archive
+# in /models/kokoro-multi-trt, reusing a host-mounted cache when one is supplied.
+COPY perception/tools/kokoro_multi_requirements.txt /tmp/kokoro_multi_requirements.txt
+RUN if [ "${JP_VERSION}" = "61" ]; then \
+      pip3 uninstall -y phonemizer && \
+      pip3 install --no-cache-dir -i ${PYPI_MIRROR} -r /tmp/kokoro_multi_requirements.txt && \
+      python3 -c "import numpy; assert numpy.__version__ == '1.26.4'; import misaki, spacy, phonemizer, fugashi, langid"; \
+    fi
+ENV KOKORO_MULTI_BUILT_FOR_JP=${JP_VERSION}
+COPY perception/tools/kokoro_multi_entrypoint.py /work/tools/kokoro_multi_entrypoint.py
 CMD ["/bin/bash", "-c", \
     "export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 && \
      source /opt/ros/humble/install/setup.bash && \
      source /ros_ws/install/setup.bash && \
      source /etc/dla-fallback.env && \
-     python3 /work/main.py"]
+     exec python3 /work/tools/kokoro_multi_entrypoint.py"]
