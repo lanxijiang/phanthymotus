@@ -41,18 +41,9 @@ class KokoroTRT:
                 if context is None:
                     raise RuntimeError(f"Cannot create TensorRT context: {path}")
                 self._contexts.append(context)
-            # One locked CUDA stream runs stages serially, so their activation
-            # memory can share an arena. Weights and I/O buffers remain separate.
-            sizes = [e.device_memory_size_v2 if managed else e.device_memory_size
-                     for e in self._engines]
-            self._activation_bytes = max(sizes)
-            if self._activation_bytes:
-                pointer = self._buffer('activation', self._activation_bytes)
-                for context in self._contexts:
-                    if managed:
-                        context.set_device_memory(pointer, self._activation_bytes)
-                    else:
-                        context.device_memory = pointer
+            # Size the serially shared arena after selecting actual shapes;
+            # the engine-wide upper bound reserves ~1 GiB even for "Hi.".
+            self._activation_bytes = 0
             contracts = [({'tokens', 'style', 'speed'}, {'d', 't_en', 'duration'}),
                          ({'d', 't_en', 'indices', 'style'}, {'features', 'f0'}),
                          ({'features', 'f0', 'style'}, {'audio'})]
@@ -105,6 +96,12 @@ class KokoroTRT:
         for name, shape in shapes.items():
             if not context.set_input_shape(name, tuple(shape)):
                 raise ValueError(f"Stage {stage} rejected {name} shape {shape}")
+        required = context.update_device_memory_size_for_shapes()
+        if required <= 0:
+            raise RuntimeError(f"Stage {stage} could not size activation memory for {shapes}")
+        pointer = self._buffer('activation', required)
+        self._activation_bytes = self._buffers['activation'][1]
+        context.set_device_memory(pointer, self._activation_bytes)
 
     def _buffer(self, name, size):
         size = max(1, int(size))
