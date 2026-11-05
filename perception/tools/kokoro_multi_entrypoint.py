@@ -13,9 +13,9 @@ import tempfile
 WORK = Path(__file__).resolve().parents[1]
 # Filled with the published, immutable release before submission. Missing pins
 # fail explicitly; an unverified or unrelated model is never substituted.
-ASSET_URL = "https://www.modelscope.cn/api/v1/models/lanxijiang/Kokoro-Multi-TRT-JP61/repo?Revision=c1d1ccf5aa97e76fde7d16095e51bfe20277ec46&FilePath=kokoro-multi-jp61-fp32-v1.tar.gz"
-ASSET_SHA256 = "1443b9d4a025c7b34092ada4fb66aafbd4d0555de60b400aa7b2d2f6ab9b2798"
-ASSET_SIZE = 243047941
+ASSET_URL = "https://www.modelscope.cn/api/v1/models/lanxijiang/Kokoro-Multi-TRT-JP61/repo?Revision=e9a6d1d9ac8fa3d75bff8178cb3312fda2d6f547&FilePath=kokoro-multi-jp61-fp32-v2.tar.gz"
+ASSET_SHA256 = "df319fa3827abd3e7b1d0779e7b043485becabcdaa570ecc7174ba8baf611d43"
+ASSET_SIZE = 231646880
 
 
 def enabled():
