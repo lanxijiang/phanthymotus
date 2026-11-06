@@ -14,6 +14,7 @@ import re
 
 
 _LANGUAGES = {"zh", "en", "ja", "ru", "de", "fr", "es", "th"}
+_PHONE_HINT = re.compile(r"\[[^\]\n]+\]\(/[^/\n]+/\)")
 _ADDRESS = re.compile(
     r"`[^`\n]+`|(?<!\w)--[A-Za-z][\w-]*(?:=[^\s;,]+)?|"
     r"(?<!\w)-[A-Za-z]\s+[+\-]?\d+(?:\.\d+)?|https?://[^\s<>`]+|www\.[^\s<>`]+|"
@@ -36,11 +37,18 @@ _NUM = r"(?:\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)"
 _NUMBER = re.compile(r"(?<![A-Za-z0-9_.])" + _NUM + r"(?![A-Za-z0-9_.])")
 _FORMULA_LIKE = re.compile(
     r"(?<![A-Za-z0-9_])(?:[+\-−][ \t]*)?[A-Za-z\u0370-\u03ff0-9_().]+"
-    r"(?:[ \t]*[+\-−×*/÷^²³=<>≤≥≠≈][ \t]*[+\-−]?[ \t]*[A-Za-z\u0370-\u03ff0-9_().]*)+"
-    r"|(?<![A-Za-z0-9_])[A-Za-z]+[ \t]*\([A-Za-z\u0370-\u03ff0-9_().+\-−×*/÷^²³ \t]+\)"
+    r"(?:[ \t]*[+\-−×·*/÷^²³=<>≤≥≠≈][ \t]*[+\-−]?[ \t]*[A-Za-z\u0370-\u03ff0-9_().]*)+"
+    r"|(?<![A-Za-z0-9_])[A-Za-z]+[ \t]*\([A-Za-z\u0370-\u03ff0-9_().+\-−×·*/÷^²³ \t]+\)"
 )
-_TOKEN = re.compile(_NUM + r"|[A-Za-z]+|π|[()+\-−×*÷/^²³=<>≤≥≠≈]")
+_TOKEN = re.compile(_NUM + r"|[A-Za-z]+|π|[()+\-−×·*÷/^²³=<>≤≥≠≈]")
 _RELATIONS = {"=": "equals", "<": "less", ">": "greater", "≤": "le", "≥": "ge", "≠": "ne", "≈": "approx"}
+_IDENTIFIER_CUES = {
+    "zh": r"验证码", "ja": r"認証コード|確認コード", "en": r"verification code",
+    "ru": r"проверочный код|номер заказа", "de": r"Bestätigungscode",
+    "fr": r"code de vérification(?: fictif)?|numéro de commande",
+    "es": r"código de verificación(?: ficticio)?|número de pedido",
+    "th": r"รหัสยืนยัน(?:สมมติ)?|หมายเลขคำสั่งซื้อ",
+}
 
 
 _lexicon_path = None
@@ -57,7 +65,16 @@ def configure_lexicon(path):
 def _config():
     if _lexicon_path is None:
         raise RuntimeError("Kokoro Multi lexicon is not configured")
-    return json.loads(_lexicon_path.read_text(encoding="utf-8"))["normalization"]
+    cfg = json.loads(_lexicon_path.read_text(encoding="utf-8"))["normalization"]
+    cfg["units"].setdefault("%", {
+        "zh": ["百分之"], "en": ["percent"], "ja": ["パーセント"],
+        "ru": ["процент", "процента", "процентов"], "de": ["Prozent"],
+        "fr": ["pour cent"], "es": ["por ciento"], "th": ["ร้อยละ"]})
+    cfg["unit_symbol_aliases"].setdefault("％", "%")
+    templates = cfg.setdefault("quantity_templates", {}).setdefault("%", {})
+    for lang, template in (("zh", "百分之{number}"), ("th", "ร้อยละ{number}")):
+        templates.setdefault(lang, template)
+    return cfg
 
 
 @lru_cache(maxsize=1)
@@ -81,7 +98,16 @@ def protected_spans(text: str) -> list[tuple[int, int]]:
 
 
 def _address_matches(text):
+    hints = [m.span() for m in _PHONE_HINT.finditer(text)]
     for match in _ADDRESS.finditer(text):
+        if any(match.start() < end and match.end() > start for start, end in hints):
+            continue
+        # The sentence following a URL/path is not part of that literal.
+        end = match.start() + len(match.group().rstrip(".,!?;，。！？；"))
+        if end < match.end():
+            match = _ADDRESS.match(text, match.start(), end)
+            if match is None:
+                continue
         # A single /x after a numeric operand may be division, not a root path.
         if re.fullmatch(r"/[A-Za-z]{1,3}", match.group()) and re.search(r"\d\s*$", text[:match.start()]):
             continue
@@ -253,7 +279,7 @@ class _MathParser:
             # with one variable.  Parsing the right operand above multiply
             # precedence keeps 2x² as 2 * (x²), not (2x)².
             implicit = node[0] == "atom" and (re.fullmatch(_NUM, node[1]) or node[1] in {"π", "pi"}) and re.fullmatch("[A-Za-z]|π", op)
-            precedence = 20 if implicit else {"+": 10, "-": 10, "−": 10, "*": 20, "×": 20, "/": 20, "÷": 20, "^": 40, "²": 40, "³": 40}.get(op, -1)
+            precedence = 20 if implicit else {"+": 10, "-": 10, "−": 10, "*": 20, "×": 20, "·": 20, "/": 20, "÷": 20, "^": 40, "²": 40, "³": 40}.get(op, -1)
             if precedence < minimum:
                 break
             if implicit:
@@ -300,7 +326,7 @@ def _speak_math(node, language, cfg):
         if node[3][0] == "binary":
             right = _join([words["left"], right, words["right"]], language)
         return _power(left, right, language, cfg)
-    key = _RELATIONS[op] if kind == "relation" else {"+": "plus", "-": "minus", "−": "minus", "*": "times", "×": "times", "/": "divide", "÷": "divide"}[op]
+    key = _RELATIONS[op] if kind == "relation" else {"+": "plus", "-": "minus", "−": "minus", "*": "times", "×": "times", "·": "times", "/": "divide", "÷": "divide"}[op]
     return _join([left, words[key], right], language)
 
 
@@ -314,6 +340,10 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
         cfg = _config()
     except (OSError, KeyError, ValueError) as exc:
         return text, [f"notation:configuration_unavailable:{type(exc).__name__}"]
+    cues = [re.escape(cue) for cue in cfg.get("unit_identifier_cues", {}).get(language, [])]
+    cues.append(_IDENTIFIER_CUES[language])
+    identifier_prefix = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(cues) +
+                                   r")[ \t:：#=\"'「]*$", re.IGNORECASE)
 
     def overlaps(start, end):
         return any(start < b and end > a for a, b, _ in spans)
@@ -412,7 +442,7 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
         matches = list(_TOKEN.finditer(raw))
         values = [m.group() for m in matches]
         covered = _TOKEN.sub("", raw).strip()
-        strong = any(v in _RELATIONS or v in {"^", "²", "³", "×", "*", "÷"} for v in values)
+        strong = any(v in _RELATIONS or v in {"^", "²", "³", "×", "·", "*", "÷"} for v in values)
         strong |= any(v.isdigit() for v in values) and any(v in {"+", "-", "−"} for v in values)
         strong |= any(cue in _context(text, start, end) for cue in cfg["math_cues"][language])
         try:
@@ -436,10 +466,10 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             if text[tokens[last-1].end():end_token.start()].strip() or overlaps(end_token.start(), end_token.end()):
                 break
             values = [t.group() for t in tokens[first:last+1]]
-            if not any(v in _RELATIONS or v in {"^", "²", "³", "+", "-", "−", "×", "*", "÷", "/"} for v in values):
+            if not any(v in _RELATIONS or v in {"^", "²", "³", "+", "-", "−", "×", "·", "*", "÷", "/"} for v in values):
                 continue
             # A bare a-b or 3/4 is also a label/date/fraction: require context.
-            strong = any(v in _RELATIONS or v in {"^", "²", "³", "×", "*", "÷"} for v in values)
+            strong = any(v in _RELATIONS or v in {"^", "²", "³", "×", "·", "*", "÷"} for v in values)
             strong |= any(v.isdigit() for v in values) and any(v in {"+", "-", "−"} for v in values)
             strong |= any(cue in _context(text, token.start(), end_token.end()) for cue in cfg["math_cues"][language])
             if not strong:
@@ -452,17 +482,25 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             # identifier.  Never accept a prefix before a remaining exponent,
             # bracket or operator (in particular the c before c² at sentence end).
             start, end = token.start(), end_token.end()
-            if (start and re.match(r"[A-Za-z0-9_.(]", text[start-1])) or re.match(r"[A-Za-z0-9_)]|\.[A-Za-z0-9_]|[ \t]*[+\-−×*/÷^²³=<>≤≥≠≈]", text[end:]):
+            if (start and re.match(r"[A-Za-z0-9_.(]", text[start-1])) or re.match(r"[A-Za-z0-9_)]|\.[A-Za-z0-9_]|[ \t]*[+\-−×·*/÷^²³=<>≤≥≠≈]", text[end:]):
                 continue
             best = (end, node)
         if best:
             end, node = best
             add(token.start(), end, "math", lambda node=node: _speak_math(node, language, cfg))
     for match in _NUMBER.finditer(text):
-        if len(match.group()) > 1 and match.group().startswith("0") and match.group()[1].isdigit():
+        if match.group().isdigit() and identifier_prefix.search(text[max(0, match.start()-64):match.start()]):
+            add(match.start(), match.end(), "identifier_digits", lambda m=match: _digits(m.group(), language, cfg))
+        elif len(match.group()) > 1 and match.group().startswith("0") and match.group()[1].isdigit():
             add(match.start(), match.end(), "ambiguous_leading_zero_number", lambda m=match: m.group())
         else:
             add(match.start(), match.end(), "number", lambda m=match: _number(m.group(), language, cfg))
+    # These operators can occur outside an equation, e.g. AI Agent＋平台 or
+    # ±0.5℃. Protected addresses and already-rendered expressions stay intact.
+    for match in re.finditer(r"[＋±]", text):
+        key = "plus" if match.group() == "＋" else "pm"
+        add(match.start(), match.end(), "operator",
+            lambda key=key: " " + cfg["operator_words"][language][key] + " ")
     result, cursor = [], 0
     for start, end, spoken in sorted(spans):
         result.extend((text[cursor:start], spoken))

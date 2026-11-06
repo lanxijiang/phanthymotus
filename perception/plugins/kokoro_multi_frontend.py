@@ -18,19 +18,20 @@ from unicodedata import category
 from .kokoro_multi_notation import configure_lexicon, normalize_notation, protected_spans
 
 LANGUAGES = ("zh", "en", "ja", "ru", "de", "fr", "es", "th")
-_LATIN = re.compile(r"([A-Za-z][A-Za-z0-9]*(?:[ \t]+[A-Za-z][A-Za-z0-9]*)*)")
+_LATIN_LETTERS = r"A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff"
+_LATIN_WORD = (rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}0-9]*"
+               rf"(?:[-'&][{_LATIN_LETTERS}0-9]+)*")
+_LATIN = re.compile(r"(" + _LATIN_WORD + r"(?:[ \t]+(?:&[ \t]+)?" + _LATIN_WORD + r")*)")
 _SYMBOL_MAP = {"ru": {"ɭ": "l", "ɵ": "o", "ʑ": "zʲ"}, "de": {"ʏ": "y"}}
 _STOPS = re.compile(r'[.!?…;:,—][)\]”"]*\s*')
 
 
-def phoneme_chunks(phones, limit=220, preferred=180, first_limit=12):
+def phoneme_chunks(phones, limit=220, preferred=180, first_limit=0):
     """Split only at whole-word/punctuation boundaries, retaining every phone.
 
-    A short first word lets the non-autoregressive graph publish its first PCM
-    before synthesizing the remaining phrases. An unusually long first word is
-    kept whole, even if that costs first-audio latency. No phone is truncated to
-    make a TensorRT profile fit. Callers may retry with a smaller ``limit`` when
-    the predicted duration exceeds the vocoder profile.
+    Keep the opening phrase together by default. No phone is truncated to make
+    a TensorRT profile fit. Callers may retry with a smaller ``limit`` when the
+    predicted duration exceeds the vocoder profile.
     """
     if not 1 <= preferred <= limit <= 510 or not 0 <= first_limit <= limit:
         raise ValueError("Invalid Kokoro Multi phoneme chunk limits")
@@ -100,7 +101,17 @@ class Frontend:
         self._identifier.set_languages(LANGUAGES)
         self._lexicon_path = model_dir / "frontend_lexicon.json"
         lexicon = json.loads(self._lexicon_path.read_text(encoding="utf-8"))
-        self._literal_symbol_words = lexicon["normalization"].get("literal_symbol_words", {})
+        cfg = lexicon["normalization"]
+        symbols = {"_": "underscore", ".": "dot", "-": "dash", "/": "slash",
+                   "\\": "backslash", ":": "colon"}
+        self._literal_symbol_words = {
+            symbol: {lang: cfg["operator_words"][lang][key] for lang in LANGUAGES}
+            for symbol, key in symbols.items()}
+        self._literal_symbol_words["@"] = {
+            "zh": "at", "en": "at", "ja": "アットマーク", "ru": "собака",
+            "de": "ät", "fr": "arobase", "es": "arroba", "th": "แอท"}
+        for symbol, words in cfg.get("literal_symbol_words", {}).items():
+            self._literal_symbol_words.setdefault(symbol, {}).update(words)
         configure_lexicon(self._lexicon_path)
         self._english = EnglishG2P(british=False, fallback=espeak.EspeakFallback(british=False))
         for word, overrides in lexicon.get("pos_overrides", {}).items():
@@ -169,6 +180,8 @@ class Frontend:
         import jieba
         from misaki.zh import ZHG2P
         from pypinyin import lazy_pinyin, Style
+        # A transliterated name's middle dot is a word boundary, not a phone.
+        text = re.sub(r"(?<=[\u4e00-\u9fff])·(?=[\u4e00-\u9fff])", " ", text)
         text = ZHG2P.map_punctuation(cn2an.transform(text, "an2cn"))
         parts = []
         for span in re.findall(r"[\u4e00-\u9fff]+|[^\u4e00-\u9fff]+", text):
@@ -203,17 +216,20 @@ class Frontend:
         if language == "zh":
             return self._chinese(text)
         if language == "ja":
-            return self._japanese(text)[0].translate(str.maketrans({"«": "(", "»": ")"}))
+            return self._japanese(text.replace("/", " スラッシュ "))[0].translate(
+                str.maketrans({"«": "(", "»": ")"}))
+        if language == "es":
+            text = text.replace("¿", "").replace("¡", "")
         if language == "th":
             return self._thai_phones(text)
         return self._espeak[language](text)[0].translate(str.maketrans(_SYMBOL_MAP.get(language, {})))
 
     def _literal_spans(self, text):
         spans = protected_spans(text)
-        # The notation parser's Unicode word boundary misses "report_v2.txtを".
+        # The notation parser's Unicode word boundary misses "report-v2.txtを".
         # Reuse that parser on ASCII runs, preserving offsets and still requiring
         # a recognized literal; a bare a_b remains ordinary frontend input.
-        for match in re.finditer(r"[!-~]*_[!-~]*", text):
+        for match in re.finditer(r"[!-~]*[_.][!-~]*", text):
             spans.extend((match.start() + start, match.start() + end)
                          for start, end in protected_spans(match[0]))
         return spans
@@ -242,11 +258,11 @@ class Frontend:
             cursor, parts = 0, []
             if language == "en":
                 for match in matches:
-                    parts.extend((spoken[cursor:match.start()],
+                    parts.extend((self._expand_literal_symbols(spoken[cursor:match.start()], language),
                                   "[" + match[0] + "](/" + self._entries[match.lastgroup] + "/)"))
                     cursor = match.end()
-                parts.append(spoken[cursor:])
-                return self._english(self._expand_literal_symbols("".join(parts), language))[0]
+                parts.append(self._expand_literal_symbols(spoken[cursor:], language))
+                return self._english("".join(parts))[0]
 
             def plain(value):
                 # Lexical matches were already selected against the intact

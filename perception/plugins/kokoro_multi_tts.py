@@ -9,7 +9,7 @@ from time import monotonic
 
 import numpy as np
 
-from plugins.tts import TTSAdapter
+from plugins.tts import PCM_FRAME_S, TTSAdapter
 from utils.resample import downsample_24k_to_16k
 from .kokoro_multi_frontend import Frontend, LANGUAGES, phoneme_chunks
 from .kokoro_multi_trt import KokoroTRT, SequenceTooLong
@@ -21,13 +21,15 @@ class KokoroMultiTTSAdapter(TTSAdapter):
     LANGUAGES = LANGUAGES
     dry_run_text = "Hi."
     handles_text_chunking = True
+    wait_for_audio_subscriber = True
 
     def __init__(self, model_dir, speaker_id=0, speed=1.0, device="gpu",
-                 language="auto", on_status=None):
+                 language="auto", on_status=None, benchmark=False):
         if device != "gpu":
             raise ValueError("Kokoro Multi TensorRT requires GPU")
         if speaker_id != 0:
             raise ValueError("Kokoro Multi selects its release voice per language; speaker_id must be 0")
+        self.frame_interval_s = 0.0 if benchmark else PCM_FRAME_S
         self._lock = threading.RLock()
         self._runtime = None
         self.set_speed(speed)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the JP6 Kokoro Multi submission through Perception's normal main module."""
+"""Collect offline Darvin audio through Perception's normal JP6 main module."""
 
 import logging
 import os
@@ -58,6 +58,8 @@ def prepare_config():
         "enabled": True,
         "engine": "kokoro-multi",
         "backend": "trt",
+        # Offline collection only: the benchmark drains audio without live playback.
+        "benchmark": True,
         "device": "gpu",
         "model_dir": model_dir,
         "language": "auto",

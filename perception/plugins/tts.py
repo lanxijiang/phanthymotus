@@ -1369,7 +1369,7 @@ def _build_tts_adapter(cfg: dict, on_status=None) -> TTSAdapter:
         return KokoroMultiTTSAdapter(
             model_dir, speaker_id, speed, device,
             language=cfg.get('tts_language') or cfg.get('language') or 'auto',
-            on_status=on_status)
+            on_status=on_status, benchmark=bool(cfg.get('benchmark', False)))
     if engine == 'mms-th':
         return MmsThaiTTSAdapter(
             model_dir, speaker_id, speed, device,
@@ -1496,6 +1496,24 @@ class _TTSNode(Node):
         with self._interrupt_lock:
             return self._interrupt_gen
 
+    def _wait_for_audio_subscriber(self):
+        """Match the existing VITS2 rule before the first Kokoro PCM frame."""
+        deadline = time.monotonic() + 5.5
+        matched_at = None
+        while not self._stop_event.is_set() and not self._interrupt_flag.is_set():
+            now = time.monotonic()
+            if self._pub.get_subscription_count() > 0:
+                if matched_at is None:
+                    matched_at = now
+                if now - matched_at >= 0.5:
+                    return
+            else:
+                matched_at = None
+            if now >= deadline:
+                raise RuntimeError(f"No stable TTS audio subscriber on {self._output_topic}")
+            time.sleep(0.01)
+        raise RuntimeError("TTS subscriber wait cancelled")
+
     def enqueue(self, text: str, trace_id: str = '', action_id: str = ''):
         if self.state != "running":
             raise RuntimeError("TTS not running; call start first")
@@ -1587,6 +1605,7 @@ class _TTSNode(Node):
                 buf = b''
                 t0 = None  # monotonic start of the pacing schedule
                 frames_sent = 0
+                frame_interval = getattr(self._adapter, 'frame_interval_s', FRAME_INTERVAL_S)
                 prebuf = []   # pre-buffer queue
 
                 def publish(frame: bytes) -> None:
@@ -1602,14 +1621,16 @@ class _TTSNode(Node):
                     """Pace and publish one frame; latches the clock on the first."""
                     nonlocal t0, t0_wall
                     if t0 is None:
+                        if getattr(self._adapter, 'wait_for_audio_subscriber', False):
+                            self._wait_for_audio_subscriber()
                         # Backdate by the frames already in the prebuffer so all
                         # of them are due in the past and go out in one burst —
                         # the consumer then starts holding PREBUF_FRAMES of audio.
                         now = _time.monotonic()
-                        t0 = now - max(0, len(prebuf) - 1) * FRAME_INTERVAL_S
+                        t0 = now - max(0, len(prebuf) - 1) * frame_interval
                         t0_wall = _time.time()
                         fire_hook("on_speaking")
-                    target = t0 + frames_sent * FRAME_INTERVAL_S
+                    target = t0 + frames_sent * frame_interval
                     now = _time.monotonic()
                     if now < target:
                         _time.sleep(target - now)
@@ -1708,8 +1729,10 @@ class _TTSNode(Node):
 
                 # flush remainder
                 if buf and not cancelled:
+                    if t0 is None and getattr(self._adapter, 'wait_for_audio_subscriber', False):
+                        self._wait_for_audio_subscriber()
                     if t0 is not None:
-                        target = t0 + frames_sent * FRAME_INTERVAL_S
+                        target = t0 + frames_sent * frame_interval
                         now = _time.monotonic()
                         if now < target:
                             _time.sleep(target - now)
