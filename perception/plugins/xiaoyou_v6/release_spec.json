@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "model_id": "xiaoyou01",
+  "voice_id": "xiaoyou01",
+  "modelscope_repo": "lanxijiang/xiaoyou01",
+  "modelscope_revision": "563669058101362ac9344ad5a943465bcd9d97a6",
+  "modelscope_file": "xiaoyou01.tar.gz",
+  "asset_bytes": 318684147,
+  "asset_sha256": "9ee4df3897f3d217e2564eaea470bddbc5b929dcf5dac2b72fbe4fdadc240b27",
+  "runtime_manifest_sha256": "7b7bef0b7d1f839642a1154aa96dee007c295f710c08fdea24370b2d812b0250",
+  "model_dir": "/models/xiaoyou01",
+  "published": true,
+  "environment_mapping": {
+    "modelscope_repo": "XIAOYOU_V6_MODELSCOPE_REPO",
+    "modelscope_revision": "XIAOYOU_V6_MODELSCOPE_REVISION",
+    "modelscope_file": "XIAOYOU_V6_MODELSCOPE_FILE",
+    "asset_bytes": "XIAOYOU_V6_ASSET_BYTES",
+    "asset_sha256": "XIAOYOU_V6_ASSET_SHA256",
+    "runtime_manifest_sha256": "XIAOYOU_V6_RUNTIME_MANIFEST_SHA256",
+    "model_dir": "XIAOYOU_V6_MODEL_DIR"
+  },
+  "english_model": {
+    "file": "frontend/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "bytes": 12806118,
+    "sha256": "1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
+    "runtime_network_download": false
+  },
+  "project_version": "xiaoyou_v6",
+  "publication_note": "Fixed JP6 FP32 runtime candidate, anonymously downloaded and SHA-verified. Real factory/MCP acceptance and Darvin score are separate pending steps. No credentials stored here."
+}

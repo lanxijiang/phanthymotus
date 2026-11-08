@@ -239,7 +239,7 @@ TOOLS = [
                 # without rebuilding the image. Mirrors asr_model in asr.py.
                 "tts_engine": {"type": "string",
                                "enum": ["vits2-zh-en", "matcha-zh-en", "mms-th",
-                                        "kokoro-multi"],
+                                        "kokoro-multi", "xiaoyou01"],
                                "description": "TTS engine, named <model>-<languages> to match "
                                               "asr_model (vits2-zh-en = VITS2 on TensorRT, "
                                               "matcha-zh-en = Matcha-icefall, "
@@ -2160,7 +2160,7 @@ DEFAULT_TTS_ENGINE = "vits2-zh-en"
 # `matcha` and `mms-th` both run on sherpa-onnx.
 #
 # Language codes, not country codes: `zh`, not `cn`.
-TTS_ENGINES = ("vits2-zh-en", "matcha-zh-en", "mms-th", "kokoro-multi")
+TTS_ENGINES = ("vits2-zh-en", "matcha-zh-en", "mms-th", "kokoro-multi", "xiaoyou01")
 # What each engine can speak, in the codes the rest of this file uses. Answered
 # by action=support_language straight from the facade: it is a property of the
 # engine, not of a loaded model, so it works while an engine is still loading.
@@ -2171,6 +2171,7 @@ ENGINE_LANGUAGES = {
     "matcha-zh-en": ("zh", "en"),
     "mms-th": ("th",),
     "kokoro-multi": KokoroTTSAdapter.LANGUAGES,
+    "xiaoyou01": ("zh", "en"),
 }
 # Older spellings, still accepted. `vits2_trt` and `sherpa_onnx` are not
 # decoration: both are already persisted in ConfigDB rows and in config.yaml on
@@ -2185,6 +2186,7 @@ ENGINE_ALIASES = {
     "matcha": "matcha-zh-en",
     "mms-thai": "mms-th",
     "mms-tts-thai": "mms-th",
+    "xiaoyou-v6": "xiaoyou01",
 }
 # Where each engine keeps its own model files. Used for any engine other than
 # the one config.yaml was written for; see TTSPlugin._model_dir_for.
@@ -2201,6 +2203,7 @@ ENGINE_MODEL_DIRS = {
     # it: the two devices load different weight files (fp32 vs int8), so they are
     # separate downloads that must not overwrite each other.
     "kokoro-multi": "/models/kokoro-multi",
+    "xiaoyou01": "/models/xiaoyou01",
 }
 # Where an engine wants to run when nothing has been configured. Only Kokoro
 # differs: it is a 310 MB fp32 graph on gpu and the CUDA provider is worth having,
@@ -2309,8 +2312,14 @@ class TTSPlugin:
         cfg = dict(self._cfg)
         cfg["engine"] = engine
         cfg["model_dir"] = self._model_dir_for(engine)
-        impl = (self._build_vits2(cfg) if engine == "vits2-zh-en"
-                else SherpaOnnxTTSPlugin(cfg, self._executor))
+        if engine == "xiaoyou01":
+            from plugins.xiaoyou_v6.plugin import TTSPlugin as XiaoyouTTSPlugin
+
+            cfg["engine"] = "xiaoyou-v6"
+            impl = XiaoyouTTSPlugin(cfg, self._executor)
+        else:
+            impl = (self._build_vits2(cfg) if engine == "vits2-zh-en"
+                    else SherpaOnnxTTSPlugin(cfg, self._executor))
         # An implementation may swallow its own model-load failure and come back
         # as an object that reports error through info (sherpa does exactly
         # that). Installing it would make the facade claim ready and let a start
