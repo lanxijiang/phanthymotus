@@ -15,7 +15,9 @@ import numpy as np
 
 from plugins.tts import PCM_FRAME_S, TTSAdapter
 from utils.resample import downsample_24k_to_16k
-from .kokoro_multi_frontend import Frontend, LANGUAGES, ReadingSession, phoneme_chunks
+from .kokoro_multi_frontend import (
+    Frontend, LANGUAGES, ReadingSession, sentence_phoneme_chunks,
+    sentence_parts, phoneme_chunks)
 
 log = logging.getLogger(__name__)
 
@@ -293,7 +295,12 @@ class KokoroMultiTTSAdapter(TTSAdapter):
             unknown -= decorations
         if unknown:
             raise ValueError(f"Kokoro Multi unsupported phonemes ({language}): {sorted(unknown)}")
-        chunks = phoneme_chunks(phones)
+        if language in {"en", "de", "fr", "es"}:
+            chunks = sentence_phoneme_chunks(phones)
+        else:
+            chunks = phoneme_chunks(phones)
+            if chunks:
+                chunks[:1] = phoneme_chunks(chunks[0], first_limit=80)
         samples, count = 0, 0
         while chunks:
             part = chunks.pop(0)
@@ -303,13 +310,16 @@ class KokoroMultiTTSAdapter(TTSAdapter):
             try:
                 audio, duration = self._runtime.infer(tokens, style, speed)
             except SequenceTooLong:
-                # Nothing from this chunk has been published. Retry smaller
-                # whole-word chunks; never truncate audio or repeat old PCM.
-                limit = len(part) // 2
-                if limit < 1:
-                    raise
-                chunks[:0] = phoneme_chunks(part, limit=limit,
-                                           preferred=limit, first_limit=0)
+                # Nothing from this chunk has been published. Keep complete
+                # sentences before reducing to smaller word groups.
+                smaller = sentence_parts(part) if language in {"en", "de", "fr", "es"} else [part]
+                if len(smaller) == 1:
+                    limit = len(part) // 2
+                    if limit < 1:
+                        raise
+                    smaller = phoneme_chunks(part, limit=limit,
+                                             preferred=limit, first_limit=0)
+                chunks[:0] = smaller
                 continue
             audio = audio.reshape(-1)
             if audio.size != 600 * int(duration.sum()):
@@ -332,9 +342,9 @@ class KokoroMultiTTSAdapter(TTSAdapter):
 WORK = Path(__file__).resolve().parents[1]
 # Filled with the published, immutable release before submission. Missing pins
 # fail explicitly; an unverified or unrelated model is never substituted.
-ASSET_URL = "https://www.modelscope.cn/api/v1/models/lanxijiang/Kokoro-Multi-TRT-JP61/repo?Revision=60eb43d7e602bf5ffb761ff87c854add8f9dede8&FilePath=kokoro-multi-jp61-fp32-v4.tar.gz"
-ASSET_SHA256 = "f23b7d16b002c46a31d4b62ba82841af73852c3af0efb42b72a7ecbaffbc48cb"
-ASSET_SIZE = 231646815
+ASSET_URL = "https://www.modelscope.cn/api/v1/models/lanxijiang/Kokoro-Multi-TRT-JP61/repo?Revision=391a364ea99b5f8b08da0adc9ca10d55347812a4&FilePath=kokoro-multi-jp61-fp32-v5.tar.gz"
+ASSET_SHA256 = "153a44746c5a3b3027100bb178ba1a98da000422c116d231bf1b8e39a4da8433"
+ASSET_SIZE = 230687712
 
 
 def enabled():

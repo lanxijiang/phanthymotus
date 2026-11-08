@@ -41,11 +41,31 @@ _DATE_LIKE = re.compile(r"(?<![A-Za-z0-9_])\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[-/.]
 _AMBIGUOUS_PAIR = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:-\d+|\s*/\s*(?:\d+|[A-Za-z]{1,3}))(?![A-Za-z0-9_.])")
 _DOTTED = re.compile(r"(?<![A-Za-z0-9_.])\d{1,4}(?:\.\d{1,4}){2,}(?![A-Za-z0-9_.])")
 _CLOCK = re.compile(r"(?<![A-Za-z0-9_:])\d{1,3}:\d{2}(?::\d{2})?(?![A-Za-z0-9_:])")
+_FR_CLOCK = re.compile(r"(?<![\w:.,])(?P<h>\d{1,2})[ \t]*h[ \t]*(?P<m>\d{2})(?![\w:]|[.,]\d)")
+_FR_METRE = re.compile(r"(?<![\w.,+\-−])(?P<n>[+\-−]?\d+(?:[.,]\d+)?)[ \t]+m(?![\w/^²³])")
 _NUM = r"(?:\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)"
 _EN_GROUPED_NUM = r"[1-9]\d{0,2}(?:,\d{3})+(?:\.\d+)?"
+_EU_GROUPED_DECIMAL = r"[1-9]\d{0,2}(?:\.\d{3})+,\d+"
 _EN_GROUPED = re.compile(r"(?<![A-Za-z0-9_.,])(?P<n>[+\-−]?" +
                          _EN_GROUPED_NUM + r")(?![A-Za-z0-9_]|[.,]\d)")
-_EN_IPV4 = re.compile(r"(?<![A-Za-z0-9_.])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_]|\.\d)")
+_SPACE_GROUPED_NUM = r"[1-9]\d{0,2}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?"
+_SPACE_GROUPED = re.compile(r"(?<![A-Za-z0-9_.,])(?<!\d )(?<!\d\u00a0)(?<!\d\u202f)"
+                            r"(?P<n>[+\-−]?" + _SPACE_GROUPED_NUM +
+                            r")(?![A-Za-z0-9_]|[.,]\d|[ \u00a0\u202f]\d)")
+_JA_MINUTES = re.compile(r"(?<![A-Za-z0-9_.])(?P<n>\d{1,2})[ \t]*分"
+                         r"(?!の[\d〇零一二三四五六七八九十百千万億兆])"
+                         r"(?=間|前|後|以上|以下|以内|未満|程度|[^\u4e00-\u9fff]|$)")
+_IPV4 = re.compile(r"(?<![A-Za-z0-9_.])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_]|\.\d)")
+_IPV4_CUES = {
+    "zh": r"(?:IPv4|IP(?:地址)?|地址)(?:是|为|為)?",
+    "en": r"\b(?:ipv4|ip|address)(?:[ \t]+(?:address|is|at))?",
+    "ja": r"(?:IPv4|IP(?:アドレス)?|アドレス)(?:は|が)?",
+    "de": r"\b(?:ipv4|ip(?:[- ]adresse)?|adresse)(?:[ \t]+(?:ist|lautet))?",
+    "fr": r"\b(?:ipv4|ip|adresse(?:[ \t]+ip)?)(?:[ \t]+(?:est|vaut))?",
+    "es": r"\b(?:ipv4|ip|dirección(?:[ \t]+ip)?)(?:[ \t]+es)?",
+    "ru": r"\b(?:ipv4|ip(?:[- ]адрес)?|адрес)(?:[ \t]+(?:сервера|хоста|равен))?",
+    "th": r"(?:IPv4|IP|ไอพี|ที่อยู่(?:ไอพี)?)(?:คือ|เป็น)?",
+}
 _EN_MONEY = re.compile(r"(?<![A-Za-z0-9_])(?P<left>[+\-−]?)(?P<c>[$£€])"
                        r"(?P<right>[+\-−]?)(?P<n>" + _EN_GROUPED_NUM + "|" +
                        _NUM + r")(?![A-Za-z0-9_]|[.,]\d)")
@@ -112,7 +132,12 @@ def _unit_pattern(language=""):
     if language in _COMMA_LANGUAGES:
         # Preserve the existing separate-number reading of comma lists.
         number = r"(?:(?<!\d,)" + _COMMA_NUM + r"|(?<=\d,)" + _NUM + r")"
-    return re.compile(r"(?<![A-Za-z0-9_.\-−])(?P<n>[+\-−]?" + number +
+    if language in {"de", "es"}:
+        number = r"(?:" + _EU_GROUPED_DECIMAL + "|" + number + ")"
+    if language in {"fr", "es"}:
+        number = r"(?:" + _SPACE_GROUPED_NUM + "|" + number + ")"
+    boundary = r"(?<!\d,)" if language in {"de", "es"} else ""
+    return re.compile(r"(?<![A-Za-z0-9_.\-−])" + boundary + r"(?P<n>[+\-−]?" + number +
         r")\s*(?P<u>" + names + r")(?![A-Za-z0-9_]|[.\-][A-Za-z0-9_])")
 
 
@@ -174,6 +199,20 @@ def _ja_integer(value):
     return "".join(reversed(groups))
 
 
+def _ja_minutes(value):
+    """Read ordinary 0–99 minute counters; spaces keep kana suffixes separate."""
+    if value >= 100:
+        return _ja_integer(value) + "分"
+    tens, ones = divmod(value, 10)
+    if value and not ones:
+        reading = (_ja_integer(tens) if tens > 1 else "") + "じゅっぷん"
+    else:
+        endings = ("れいふん", "いっぷん", "にふん", "さんぷん", "よんぷん",
+                   "ごふん", "ろっぷん", "ななふん", "はっぷん", "きゅうふん")
+        reading = (_ja_integer(tens * 10) if tens else "") + endings[ones]
+    return " " + reading + " "
+
+
 def _integer(value, language, **kwargs):
     if language == "zh":
         from cn2an import an2cn
@@ -190,8 +229,12 @@ def _digits(value, language, cfg):
 
 def _number(value, language, cfg):
     value = str(value).replace("−", "-")
+    if language in {"fr", "es"}:
+        value = re.sub(r"[ \u00a0\u202f]", "", value)
     if language == "en" and re.fullmatch(r"[+\-]?" + _EN_GROUPED_NUM, value):
         value = value.replace(",", "")
+    if language in {"de", "es"} and re.fullmatch(r"[+\-]?" + _EU_GROUPED_DECIMAL, value):
+        value = value.replace(".", "")
     if language in _COMMA_LANGUAGES:
         value = value.replace(",", ".")
     if value[:1] in {"-", "+"}:
@@ -219,6 +262,8 @@ def _unit_form(forms, value, language):
     raw = value.replace("−", "-")
     if language == "en" and re.fullmatch(r"[+\-]?" + _EN_GROUPED_NUM, raw):
         raw = raw.replace(",", "")
+    if language in {"de", "es"} and re.fullmatch(r"[+\-]?" + _EU_GROUPED_DECIMAL, raw):
+        raw = raw.replace(".", "")
     number = Decimal(raw.replace(",", ".") if language in _COMMA_LANGUAGES else raw)
     if language == "ru":
         if number != int(number) or "." in value or "," in value:
@@ -228,8 +273,21 @@ def _unit_form(forms, value, language):
     return forms[0] if abs(number) == 1 else forms[-1]
 
 
-def _quantity(value, unit, language, cfg):
+def _quantity(value, unit, language, cfg, genitive_decimal=False):
+    if language == "ja" and unit == "minute" and value.isdigit():
+        return _ja_minutes(int(value))
+    if language in {"fr", "es"}:
+        value = re.sub(r"[ \u00a0\u202f]", "", value)
     words = _number(value, language, cfg)
+    if genitive_decimal:
+        whole, fraction = re.split(r"[.,]", value)
+        singular = lambda n: n % 10 == 1 and n % 100 != 11
+        words = " ".join([
+            _integer(int(whole), "ru", gender="f", case="g"),
+            "целой" if singular(int(whole)) else "целых",
+            _integer(int(fraction), "ru", gender="f", case="g"),
+            _integer(10 ** len(fraction), "ru", to="ordinal", gender="f", case="g",
+                     plural=not singular(int(fraction)))])
     if language == "de" and re.fullmatch(r"[+\-−]?1", value):
         words = re.sub(r"eins$", "eine" if unit in {"hour", "minute", "second"} else "ein", words)
     if language == "ru" and unit in {"minute", "second"} and re.fullmatch(r"\d+", value):
@@ -285,7 +343,10 @@ def _clock(raw, duration, language, cfg):
         result += " " + (("oh " if minute < 10 else "") + _integer(minute, language) if minute else "o'clock")
     elif language in {"zh", "ja"}:
         result = _integer(hour, language) + "点" if language == "zh" else cfg["clock_hour_readings"]["ja"][hour]
-        result += (("零" if language == "zh" and 0 < minute < 10 else "") + _integer(minute, language) + "分") if minute or len(values) == 3 else ("整" if language == "zh" else "ちょうど")
+        if language == "ja":
+            result += _ja_minutes(minute) if minute or len(values) == 3 else "ちょうど"
+        else:
+            result += ("零" if 0 < minute < 10 else "") + _integer(minute, language) + "分" if minute or len(values) == 3 else "整"
     elif language == "de":
         result = ("ein" if hour == 1 else _integer(hour, language)) + " Uhr" + (" " + _integer(minute, language) if minute else "")
     elif language == "th":
@@ -460,15 +521,24 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             add(match.start(), match.end(), "iso_date", lambda m=match: _date(m.group(), language, cfg))
     for match in _DATE_LIKE.finditer(text):
         add(match.start(), match.end(), "ambiguous_date_format", lambda m=match: m.group())
-    if language == "en":
-        for match in _EN_IPV4.finditer(text):
-            prefix = text[max(0, match.start()-48):match.start()]
-            valid = all(int(part) <= 255 for part in match.group().split("."))
-            cue = re.search(r"\b(?:ipv4|ip|address)(?:[ \t]+(?:address|is|at))?"
-                            r"[ \t:=]*$", prefix, re.I)
-            if valid and cue:
-                add(match.start(), match.end(), "ipv4",
-                    lambda m=match: " dot ".join(_digits(part, "en", cfg) for part in m.group().split(".")))
+    for match in _IPV4.finditer(text):
+        prefix = text[max(0, match.start()-48):match.start()]
+        valid = all(int(part) <= 255 for part in match.group().split("."))
+        cue = re.search(_IPV4_CUES[language] + r"[ \t:=：]*$", prefix, re.I)
+        if valid and cue:
+            add(match.start(), match.end(), "ipv4",
+                lambda m=match: (" " + cfg["operator_words"][language]["dot"] + " ").join(
+                    _digits(part, language, cfg) for part in m.group().split(".")))
+    if language in {"de", "es"}:
+        for match in _unit_pattern(language).finditer(text):
+            prefix = text[max(0, match.start()-64):match.start()]
+            if (not re.fullmatch(r"[+\-−]?" + _EU_GROUPED_DECIMAL, match["n"])
+                    or match["u"] in {"KJ", "KM"} or identifier_prefix.search(prefix)
+                    or re.match(r"[/^²³]", text[match.end():])):
+                continue
+            unit = cfg["unit_symbol_aliases"].get(match["u"], match["u"])
+            add(match.start(), match.end(), "quantity",
+                lambda m=match, u=unit: _quantity(m["n"], u, language, cfg))
     for match in _DOTTED.finditer(text):
         if not overlaps(match.start(), match.end()):
             add(match.start(), match.end(), "ambiguous_dotted_identifier", lambda m=match: m.group())
@@ -484,7 +554,33 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             if suffix:
                 end += suffix.end()
         add(match.start(), end, "duration" if duration else "clock", lambda m=match, d=duration: _clock(m.group(), d, language, cfg))
+    if language == "fr":
+        for match in _FR_CLOCK.finditer(text):
+            prefix = re.split(r"[.!?;\n]", text[max(0, match.start()-64):match.start()])[-1]
+            if any(re.search(r"(?<!\w)" + re.escape(cue) + r"(?!\w)", prefix, re.I)
+                   for cue in cfg["duration_cues"]["fr"]):
+                continue
+            if re.search(r"(?<!\w)(?:à|de|entre|vers|dès|jusqu['’]à|horaire(?: est)?|heure(?: est)?)[ \t:]*$", prefix, re.I):
+                add(match.start(), match.end(), "french_clock",
+                    lambda m=match: _clock(m["h"] + ":" + m["m"], False, "fr", cfg))
+    if language == "ja":
+        for match in _JA_MINUTES.finditer(text):
+            if text[:match.start()].rstrip(" \t").endswith(("+", "-", "−", "＋", "－")):
+                continue
+            add(match.start(), match.end(), "japanese_minutes",
+                lambda m=match: _ja_minutes(int(m["n"])))
     formula_ranges = [(match.start(), match.end()) for match in formula_pattern.finditer(text)]
+    if language == "fr":
+        for match in _FR_METRE.finditer(text):
+            prefix = re.split(r"[;!?\n]|(?<!\d)\.|\.(?!\d)", text[max(0, match.start()-64):match.start()])[-1]
+            if (identifier_prefix.search(prefix) or
+                    any(start < match.end() and match.start() < end for start, end in formula_ranges) or
+                    not re.search(r"(?<!\w)(?:mesure(?:nt)?|longueur|largeur|hauteur|distance|passage|câble)(?!\w)", prefix, re.I)):
+                continue
+            add(match.start(), match.end(), "french_metres",
+                lambda m=match: _join([_number(m["n"], "fr", cfg),
+                    "mètre" if abs(Decimal(m["n"].replace("−", "-").replace(",", "."))) < 2
+                    else "mètres"], "fr"))
     for match in _unit_pattern(language).finditer(text):
         unit = cfg["unit_symbol_aliases"].get(match["u"], match["u"])
         if language == "ru":
@@ -501,8 +597,10 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             add(match.start(), end, "unsupported_compound_unit", lambda m=match, e=end: text[m.start():e])
             continue
         prefix = text[max(0, match.start()-48):match.start()]
-        if any(re.search(r"(?<![A-Za-z0-9_])" + re.escape(cue) + r"[ \t:：#=\"'「]*$", prefix, re.I)
-               for cue in cfg.get("unit_identifier_cues", {}).get(language, [])):
+        if ((language in {"de", "es"} and re.fullmatch(r"[+\-−]?" + _EU_GROUPED_DECIMAL, match["n"])
+             and identifier_prefix.search(prefix)) or
+                any(re.search(r"(?<![A-Za-z0-9_])" + re.escape(cue) + r"[ \t:：#=\"'「]*$", prefix, re.I)
+                    for cue in cfg.get("unit_identifier_cues", {}).get(language, []))):
             add(match.start(), match.end(), "quantity_or_identifier_requires_context", lambda m=match: m.group())
             continue
         context = _context(text, match.start(), match.end())
@@ -511,13 +609,32 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             if not any(cue in context for cue in cues):
                 add(match.start(), match.end(), "ambiguous_nonstandard_unit", lambda m=match: m.group())
                 continue
-        add(match.start(), match.end(), "quantity", lambda m=match, u=unit: _quantity(m["n"], u, language, cfg))
+        genitive_decimal = (language == "ru" and unit == "%"
+                            and re.fullmatch(r"\d+[.,]\d+", match["n"])
+                            and (re.search(r"(?<!\w)до[ \t]+$", prefix, re.I)
+                                 or (re.search(r"(?<!\w)с[ \t]+$", prefix, re.I)
+                                     and re.search(r"(?<!\w)до[ \t]+[+\-−]?" +
+                                                   _COMMA_NUM + r"[ \t]*[%％]",
+                                                   re.split(r"[;；。!?？！\n]|(?<!\d)\.|\.(?!\d)",
+                                                            text[match.end():], 1)[0], re.I))))
+        add(match.start(), match.end(), "quantity",
+            lambda m=match, u=unit, g=bool(genitive_decimal): _quantity(m["n"], u, language, cfg, g))
 
     if language == "en":
         for match in _EN_GROUPED.finditer(text):
             prefix = text[max(0, match.start()-64):match.start()]
             add(match.start(), match.end(), "english_grouped_number",
                 lambda m=match, p=prefix: _digits(m["n"].replace(",", ""), "en", cfg) if m["n"][0].isdigit() and identifier_prefix.search(p) else _number(m["n"], "en", cfg))
+
+    if language in {"fr", "es"}:
+        for match in _SPACE_GROUPED.finditer(text):
+            if any(start < match.end() and match.start() < end for start, end in formula_ranges):
+                continue
+            value = re.sub(r"[ \u00a0\u202f]", "", match["n"])
+            prefix = text[max(0, match.start()-64):match.start()]
+            add(match.start(), match.end(), "space_grouped_number",
+                lambda v=value, p=prefix: _digits(v, language, cfg)
+                if v.isdigit() and identifier_prefix.search(p) else _number(v, language, cfg))
 
     for match in _AMBIGUOUS_PAIR.finditer(text):
         context = _context(text, match.start(), match.end())
@@ -676,6 +793,35 @@ def phoneme_chunks(phones, limit=220, preferred=180, first_limit=0):
     return chunks
 
 
+def sentence_parts(phones):
+    ends = [0, *[m.end() for m in re.finditer(r'[.!?…][)\]”"]*\s+', phones)], len(phones)]
+    return [phones[start:end].strip() for start, end in zip(ends, ends[1:])
+            if phones[start:end].strip()]
+
+
+def sentence_phoneme_chunks(phones):
+    """Pack complete sentences before falling back to clause/word boundaries."""
+    chunks = []
+    for sentence in sentence_parts(phones):
+        parts = phoneme_chunks(sentence)
+        if chunks and len(chunks[-1]) + len(parts[0]) + 1 <= 220:
+            chunks[-1] += " " + parts.pop(0)
+        chunks.extend(parts)
+    if chunks:
+        # Allow a nearby sentence end, or an earlier complete opening clause,
+        # instead of resetting prosody in the middle of a phrase.
+        opening = [m for m in _STOPS.finditer(chunks[0][:100])
+                   if m.end() >= 24]
+        if opening:
+            sentences = [m for m in opening if m.group()[0] in ".!?…"]
+            end = min(sentences or opening, key=lambda m: abs(m.end() - 80)).end()
+            chunks[:1] = [part for part in (chunks[0][:end].strip(),
+                                          chunks[0][end:].strip()) if part]
+        else:
+            chunks[:1] = phoneme_chunks(chunks[0], first_limit=80)
+    return chunks
+
+
 class ReadingSession:
     """One node's language state; update only after complete PCM delivery."""
 
@@ -792,7 +938,10 @@ class Frontend:
             # Pure Han text without kana is normally Chinese in this deployment;
             # callers can explicitly select Japanese for ambiguous short names.
             return "zh"
+        if re.fullmatch(r"(?:Hallo|Danke)[.!?…]*", text.strip(), re.I):
+            return "de"
         ordinary = self._terms.sub(" ", text)
+        ordinary = re.sub(r"(?<!\w)IP(?:v[46])?(?!\w)", " ", ordinary, flags=re.I)
         spans = protected_spans(ordinary)
         spans += [m.span() for m in _unit_pattern().finditer(ordinary)]
         spans += [m.span() for m in _EN_HARDWARE.finditer(ordinary)]
