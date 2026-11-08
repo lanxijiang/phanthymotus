@@ -1,8 +1,11 @@
-"""Independent Xiaoyou V6 frontend: current Kokoro routing plus CUDA only.
+"""Independent Xiaoyou V6 frontend: typed formats, math and scoped pronunciation.
 
 No legacy project rules, dictionaries, or code are imported. The training frontend
 and model files remain unchanged. Native Misaki token hooks preserve context.
 """
+from .text_normalization import normalize_general
+from .math_normalization import normalize_math
+from .context_pronunciation import ContextualZHG2P
 from hashlib import sha256
 from importlib.metadata import version
 import json
@@ -42,7 +45,7 @@ class Frontend:
 
         self.en = ExactCudaG2P(trf=False, british=False,
                               fallback=espeak.EspeakFallback(british=False), unk='❓')
-        self.zh = zh.ZHG2P(version=None, unk='❓')
+        self.zh = ContextualZHG2P(zh.ZHG2P(version=None, unk='❓'))
         self.term_phonemes = dict(terms)
         self.metadata = {
             'project_version': 'xiaoyou_v6', 'misaki_version': '0.9.4',
@@ -53,17 +56,36 @@ class Frontend:
             'terms_path': str(self.terms_path.resolve()),
             'terms_sha256': sha256(self.terms_path.read_bytes()).hexdigest(),
             'term_overrides': dict(terms), 'legacy_rule_reuse': False,
-            'raw_text_substitution': False,
+            'raw_text_substitution': True,
+            'normalization_order': ['typed_formats_on_raw_text', 'math_on_raw_superscripts', 'NFKC', 'native_G2P'],
+            'normalization_module_sha256': {name: sha256((HERE / name).read_bytes()).hexdigest() for name in
+                ('text_normalization.py', 'math_normalization.py', 'context_pronunciation.py')},
+            'context_pronunciation': self.zh.metadata,
             'override_scope': 'complete_native_spacy_mtoken_before_subtokenize',
             'lexicon_golds_modified': False,
         }
 
-    def __call__(self, text, language):
-        normalized = unicodedata.normalize('NFKC', text).strip()
+    @staticmethod
+    def normalize_text(text, language='auto'):
+        if not isinstance(text, str):
+            raise TypeError('V6 text must be a string')
+        if language not in ('auto', 'mixed', 'zh', 'en'):
+            raise ValueError('Unsupported V6 normalization language')
+        normalized = normalize_math(normalize_general(text, language), language)
+        normalized = unicodedata.normalize('NFKC', normalized).strip()
         normalized = re.sub(r'\s+', ' ', normalized)
         normalized = normalized.replace('·', ' ').replace('–', '—')
         if re.search(r'[À-ÖØ-öø-ÿ]', normalized):
             raise ValueError('unsupported_nonEnglish_Latin_from_dataset')
+        return normalized
+
+    def __call__(self, text, language, *, normalization_language=None):
+        if language not in ('zh', 'en', 'auto', 'mixed'):
+            raise ValueError('Unsupported V6 phoneme language')
+        norm_language = language if normalization_language is None else normalization_language
+        normalized = self.normalize_text(text, norm_language)
+        if language in ('auto', 'mixed'):
+            language = 'zh' if re.search(r'[\u3400-\u9fff]', text) or not re.search('[A-Za-z]', text) else 'en'
         if language == 'en':
             phonemes = self.en(normalized)[0]
         else:

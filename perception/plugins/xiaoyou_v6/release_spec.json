@@ -3,11 +3,11 @@
   "model_id": "xiaoyou01",
   "voice_id": "xiaoyou01",
   "modelscope_repo": "lanxijiang/xiaoyou01",
-  "modelscope_revision": "563669058101362ac9344ad5a943465bcd9d97a6",
-  "modelscope_file": "xiaoyou01.tar.gz",
-  "asset_bytes": 318684147,
-  "asset_sha256": "9ee4df3897f3d217e2564eaea470bddbc5b929dcf5dac2b72fbe4fdadc240b27",
-  "runtime_manifest_sha256": "7b7bef0b7d1f839642a1154aa96dee007c295f710c08fdea24370b2d812b0250",
+  "modelscope_revision": "6c30c7402e2849ed258d6e157e9f6fc07a38f7f2",
+  "modelscope_file": "xiaoyou01-jp6-fp32-frontend-20261109-v2.tar.gz",
+  "asset_bytes": 318684166,
+  "asset_sha256": "b96b3c1145a9fbe4905b4d146162d4d3e64b5f0b70a4947477cc87a6b902f797",
+  "runtime_manifest_sha256": "39e6808af053d119995d5b9eec1e015b467fa8a5bb05cf9298a05bba5ab6bc9e",
   "model_dir": "/models/xiaoyou01",
   "published": true,
   "environment_mapping": {
@@ -26,5 +26,5 @@
     "runtime_network_download": false
   },
   "project_version": "xiaoyou_v6",
-  "publication_note": "Fixed JP6 FP32 runtime candidate, anonymously downloaded and SHA-verified. Real factory/MCP acceptance and Darvin score are separate pending steps. No credentials stored here."
+  "publication_note": "V6 normalization repair v2. Fixed anonymous-verified resource revision; same16500 FP32 weights/style/plans. JP6 complete-text and public-factory acceptance are scoped separately. No code commit/push or Darvin task for this repair yet."
 }

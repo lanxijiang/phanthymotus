@@ -18,8 +18,9 @@ import numpy as np
 from .assets import ensure_runtime_bundle, resolve_runtime_manifest_pin
 from .gpu_engine import GPUEnginePool
 from .phase_dsp import excitation_inputs
-from .contract import SOURCE_SHA, FRONTEND_SHA, TERMS_SHA, PHONE_ABI, VOCAB_SHA, CONFIG_SHA, sha, profile_sha256
-from .v6_frontend import Frontend
+from .contract import (SOURCE_SHA, FRONTEND_SHA, TERMS_SHA, PHONE_ABI, VOCAB_SHA, CONFIG_SHA,
+                       NORMALIZATION_REVISION, NORMALIZATION_MODULE_SHAS,
+                       sha, profile_sha256, validate_frontend_files, frontend_acceptance_metadata)
 
 STYLE_FILE_SHA = 'a157b56d6fb1242abea3d79d18c278def0066c1db2676805dd651e3b01771068'
 STYLE_RAW_SHA = 'd95f2c67525e3ecd83b4f09f9915a13350cc4e0a89cac6caef326507e4fcd78b'
@@ -235,11 +236,8 @@ class TRTBackend:
                 or m.get('native_weights_sha256') != NATIVE_WEIGHTS_SHA):
             raise ValueError('Wrong V6 GPU model/lineage/precision declaration')
         front = m.get('frontend', {})
-        if (front.get('abi') != PHONE_ABI or front.get('source_sha256') != FRONTEND_SHA
-                or front.get('terms_sha256') != TERMS_SHA or front.get('vocab_sha256') != VOCAB_SHA
-                or sha(Path(__file__).with_name('v6_frontend.py')) != FRONTEND_SHA
-                or sha(Path(__file__).with_name('v6_terms.json')) != TERMS_SHA):
-            raise ValueError('V6 frontend/terms/phone ABI differs; no legacy rules are allowed')
+        frontend_source_files = validate_frontend_files(front, Path(__file__).parent)
+        frontend_acceptance = frontend_acceptance_metadata(m.get('validation', {}))
         if sha(self.root / 'config.json') != CONFIG_SHA or sha(self.root / 'style.npy') != STYLE_FILE_SHA:
             raise ValueError('V6 fixed configuration/style asset differs')
         stages = m['stages']
@@ -273,7 +271,13 @@ class TRTBackend:
         if getattr(jieba.dt, 'initialized', False) is not True:
             raise RuntimeError('V6 Jieba dictionary initialization did not complete')
         self.frontend_dictionary_initialization_seconds = time.perf_counter() - dictionary_started
+        # Import only after manifest/contract/actual component hashes have passed.
+        from .v6_frontend import Frontend
         self.frontend = Frontend(config_path=self.root / 'config.json')
+        if (self.frontend.metadata.get('frontend_sha256') != FRONTEND_SHA
+                or self.frontend.metadata.get('terms_sha256') != TERMS_SHA
+                or self.frontend.metadata.get('normalization_module_sha256') != NORMALIZATION_MODULE_SHAS):
+            raise ValueError('V6 imported frontend component metadata differs from the fixed source contract')
         self.legal_ids = set(self.frontend.vocab.values()) | {0}
         style = np.load(self.root / 'style.npy', allow_pickle=False)
         if style.shape != (1, 256) or style.dtype != np.float32 or not np.isfinite(style).all() or hashlib.sha256(np.ascontiguousarray(style).tobytes()).hexdigest() != STYLE_RAW_SHA:
@@ -300,16 +304,22 @@ class TRTBackend:
             'cpu_neural_fallback': False, 'runtime_manifest_sha256': pin, 'source_checkpoint_sha256': SOURCE_SHA,
             'global_step': 16500, 'jetpack_major': major, 'tensorrt_version': self.pool.version,
             'limits': self.limits, 'inference_policy': m['inference_policy'],
-            'long_profiles_verified': False, 'short_e2e_verified': m.get('validation', {}).get('short_e2e_verified') is True,
+            'long_profiles_verified': False, 'short_e2e_verified': frontend_acceptance['short_e2e_verified'],
+            'normalization_revision': NORMALIZATION_REVISION,
+            'normalization_module_sha256': dict(NORMALIZATION_MODULE_SHAS),
+            'frontend_source_files': frontend_source_files,
+            'frontend_acceptance_bound': frontend_acceptance['frontend_acceptance_bound'],
+            'frontend_acceptance_report_sha256': frontend_acceptance['frontend_acceptance_report_sha256'],
+            'frontend_pcm_parity_validated': frontend_acceptance['frontend_pcm_parity_validated'],
             'frontend': self.frontend.metadata,
             'frontend_dictionary_initialized': True,
             'frontend_dictionary_initialization_seconds': self.frontend_dictionary_initialization_seconds,
             'frontend_dictionary_initialization_scope': 'service startup before GPU allocation; dictionary only, no text/audio calls',
             'streaming': 'complete natural clauses with bounded prefetch',
-            'ttft_validated': m.get('validation', {}).get('ttft_1s_passed') is True,
-            'jetson_validated': m.get('validation', {}).get('jetson_end_to_end_passed') is True,
-            'darvin_validated': m.get('validation', {}).get('darvin_passed') is True,
-            'three_process_instances_validated': m.get('validation', {}).get('three_process_instances_passed') is True,
+            'ttft_validated': frontend_acceptance['ttft_validated'],
+            'jetson_validated': frontend_acceptance['jetson_validated'],
+            'darvin_validated': frontend_acceptance['darvin_validated'],
+            'three_process_instances_validated': frontend_acceptance['three_process_instances_validated'],
             'logical_instance_sharing': 'one engine set per process; three processes/containers need independent measured acceptance'}
 
     validate_options = staticmethod(validate_options)
@@ -321,13 +331,15 @@ class TRTBackend:
     def _outputs(self, stage, symbols):
         return {name: _concrete(shape, symbols) for name, shape in self.stages[stage]['outputs'].items()}
 
-    def synthesize_wave(self, text, *, language='auto', speed=1.0, _cancel=None):
+    def synthesize_wave(self, text, *, language='auto', speed=1.0, _cancel=None, _normalization_language=None):
         validate_options(language, speed)
+        requested_language = language if _normalization_language is None else _normalization_language
+        validate_options(requested_language, speed)
         if _cancel is not None and _cancel.is_set():
             raise _CancelledGeneration('Request cancelled before generation')
         language = self.resolve_language(text, language)
         with self._frontend_lock:
-            phones, ids = self.frontend(text, language)
+            phones, ids = self.frontend(text, language, normalization_language=requested_language)
         return self._synthesize_ids(ids, _cancel=_cancel)
 
     def synthesize_tokens(self, tokens, style=None, speed=1.0, *, _cancel=None):
@@ -406,23 +418,24 @@ class TRTBackend:
                 for value in live:
                     value.release()
 
-    def _audio_clauses(self, text, language, cancel):
+    def _audio_clauses(self, text, language, cancel, *, normalization_language=None):
         for clause in natural_clauses(text):
             if cancel is not None and cancel.is_set():
                 return
-            yield from self._audio_clause(clause, language, cancel)
+            yield from self._audio_clause(clause, language, cancel, normalization_language=normalization_language)
 
-    def _audio_clause(self, text, language, cancel):
+    def _audio_clause(self, text, language, cancel, *, normalization_language=None):
         if cancel is not None and cancel.is_set():
             return
         try:
-            wave, _, _ = self.synthesize_wave(text, language=language, _cancel=cancel)
+            wave, _, _ = self.synthesize_wave(text, language=language, _cancel=cancel,
+                                                _normalization_language=normalization_language)
         except _CancelledGeneration:
             return
         except ProfileLimitError:
             left, right = safe_split(text)
-            yield from self._audio_clause(left, language, cancel)
-            yield from self._audio_clause(right, language, cancel)
+            yield from self._audio_clause(left, language, cancel, normalization_language=normalization_language)
+            yield from self._audio_clause(right, language, cancel, normalization_language=normalization_language)
             return
         from utils.resample import resample_poly, float_to_pcm16
         converted = resample_poly(wave)
@@ -439,7 +452,15 @@ class TRTBackend:
             return
         if not any(c.isalnum() for c in text):
             raise ValueError('xiaoyou01 text contains no spoken content')
+        requested_language = language
+        # Keep the original G2P route, but normalize the COMPLETE request before
+        # splitting: commas in tensors/operators/groups must not be cut first.
+        # Unsupported expressions fail before any producer/PCM is started.
         language = self.resolve_language(text, language)
+        with self._frontend_lock:
+            text = self.frontend.normalize_text(text, requested_language)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError('V6 normalization produced no spoken text')
         pending = queue.Queue(maxsize=2)
         stop = threading.Event()
         started = time.perf_counter()
@@ -457,7 +478,7 @@ class TRTBackend:
         combined = CombinedCancel()
         def produce():
             try:
-                for pcm in self._audio_clauses(text, language, combined):
+                for pcm in self._audio_clauses(text, language, combined, normalization_language=requested_language):
                     if not offer(('pcm', pcm)):
                         return
                 offer(('end', None))
