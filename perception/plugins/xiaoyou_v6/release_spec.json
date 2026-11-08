@@ -3,11 +3,11 @@
   "model_id": "xiaoyou01",
   "voice_id": "xiaoyou01",
   "modelscope_repo": "lanxijiang/xiaoyou01",
-  "modelscope_revision": "6c30c7402e2849ed258d6e157e9f6fc07a38f7f2",
-  "modelscope_file": "xiaoyou01-jp6-fp32-frontend-20261109-v2.tar.gz",
-  "asset_bytes": 318684166,
-  "asset_sha256": "b96b3c1145a9fbe4905b4d146162d4d3e64b5f0b70a4947477cc87a6b902f797",
-  "runtime_manifest_sha256": "39e6808af053d119995d5b9eec1e015b467fa8a5bb05cf9298a05bba5ab6bc9e",
+  "modelscope_revision": "edc470a8207a218a4d91421a22e45d1c1d8af444",
+  "modelscope_file": "xiaoyou01-jp6-fp32-frontend-20261109-v3.tar.gz",
+  "asset_bytes": 318684392,
+  "asset_sha256": "c8c2cb816fce3edd268066ca75ccc68ac0e11228033071b2d9f09f9ad4ea2db2",
+  "runtime_manifest_sha256": "abbed610e9b810392f0bdfc9b5512449aee402014abde12618e8ebe8dd17e56e",
   "model_dir": "/models/xiaoyou01",
   "published": true,
   "environment_mapping": {
@@ -26,5 +26,5 @@
     "runtime_network_download": false
   },
   "project_version": "xiaoyou_v6",
-  "publication_note": "V6 normalization repair v2. Fixed anonymous-verified resource revision; same16500 FP32 weights/style/plans. JP6 complete-text and public-factory acceptance are scoped separately. No code commit/push or Darvin task for this repair yet."
+  "publication_note": "Minimal V6 normalization runtime. Diagnostic self-test entrypoints excluded; live speech logic unchanged from pinned A100/JP6 regressions. Fixed anonymously verified asset version; Darvin score and public-factory acceptance are separate."
 }
