@@ -695,11 +695,17 @@ ENV PYTHONUNBUFFERED=1
 ENV RCUTILS_COLORIZED_OUTPUT=0
 
 # xiaoyou01 feature profile: private JP61 frontend; original main/config stay intact.
+# Reuse the image's pip to bootstrap only this venv. --without-pip avoids
+# Debian ensurepip and an extra apt transaction/ldconfig trigger in this layer.
 RUN if [ "${JP_VERSION}" = "61" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends python3-venv && \
-      python3 -m venv --system-site-packages /opt/xiaoyou-v6 && \
+      python3 -B -c 'import venv, pip' && \
+      python3 -m venv --without-pip --system-site-packages /opt/xiaoyou-v6 && \
+      /opt/xiaoyou-v6/bin/python3 -B -c \
+        'import sys, sysconfig; assert sys.prefix == "/opt/xiaoyou-v6" and sys.prefix != sys.base_prefix; assert sysconfig.get_path("purelib").startswith(sys.prefix + "/")' && \
       /opt/xiaoyou-v6/bin/python3 -m pip --isolated --disable-pip-version-check install \
-        --no-cache-dir -i "${PYPI_MIRROR}" pip==26.3 && \
+        --no-cache-dir --ignore-installed -i "${PYPI_MIRROR}" pip==26.3 && \
+      /opt/xiaoyou-v6/bin/python3 -B -c \
+        'import pip, sys; assert pip.__version__ == "26.3"; assert pip.__file__.startswith(sys.prefix + "/")' && \
       /opt/xiaoyou-v6/bin/python3 -m pip --isolated --disable-pip-version-check install \
         --no-cache-dir --ignore-installed -i "${PYPI_MIRROR}" \
         -r /work/plugins/xiaoyou_v6/requirements.gpu.jp6.txt && \
