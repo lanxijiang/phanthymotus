@@ -63,7 +63,7 @@ def _verified_bundle(root, expected_manifest_sha256):
             or manifest.get('backend') != 'tensorrt_fp32'
             or manifest.get('precision') != 'FP32'
             or manifest.get('sample_rate') != 24000
-            or manifest.get('global_step') != 16500):
+            or manifest.get('global_step') != 19500):
         raise ValueError('Wrong V6 GPU runtime bundle identity')
     files = manifest.get('files')
     if not isinstance(files, dict) or not files or MANIFEST in files:

@@ -24,10 +24,10 @@ from .contract import (SOURCE_SHA, FRONTEND_SHA, TERMS_SHA, PHONE_ABI, VOCAB_SHA
 
 STYLE_FILE_SHA = 'a157b56d6fb1242abea3d79d18c278def0066c1db2676805dd651e3b01771068'
 STYLE_RAW_SHA = 'd95f2c67525e3ecd83b4f09f9915a13350cc4e0a89cac6caef326507e4fcd78b'
-NATIVE_WEIGHTS_SHA = '6a8d13d7b656e44d4d39b051aff22c68a331b2d5c87f7c64551086c017564f8b'
+NATIVE_WEIGHTS_SHA = '6ed03552b25d77f5e7be5fc8abce3087ccfbdcf078eda3b81d771239789408ed'
 GRAPH_SHAS = {
-    'encoder': '8765b7e745defc1ea3871b04312e0a539c905d762f21925cf9961610aa2a1c9b',
-    'acoustic': 'ba5ae6186f1365adf8fdac6ca46c7818eaf43dcef4a3a3e4cf7ee178fc602d5d',
+    'encoder': 'b916c43a7a14a753763a6bffc010e70caf1dee2d6e132292c20bacb2aa76f44c',
+    'acoustic': '063382dfe5f354c40774dea4bef2cb2c7e140bb9332fa22adc0a61a040061305',
     'source': '38d2834c8bf6fc9f0ea5dead632a035455c927d7f6f466648c31ef9d114a3151',
     'ups0': 'f83353c09945a496574b8b89c83a386e0ee2f2ec52bc32b1728e9382c95f42b7',
     'ups1': 'deadfd607356187d8ed8846d9f57f376397e5c5849e2870a697e6b8d8d0fb75b',
@@ -232,7 +232,7 @@ class TRTBackend:
                 or m.get('project_version') != 'xiaoyou_v6' or m.get('model_id') != 'xiaoyou01'
                 or m.get('voice_id') != 'xiaoyou01' or m.get('backend') != 'tensorrt_fp32'
                 or m.get('precision') != 'FP32' or m.get('sample_rate') != 24000
-                or m.get('global_step') != 16500 or m.get('source_checkpoint_sha256') != SOURCE_SHA
+                or m.get('global_step') != 19500 or m.get('source_checkpoint_sha256') != SOURCE_SHA
                 or m.get('native_weights_sha256') != NATIVE_WEIGHTS_SHA):
             raise ValueError('Wrong V6 GPU model/lineage/precision declaration')
         front = m.get('frontend', {})
@@ -302,7 +302,7 @@ class TRTBackend:
         self.stages = stages
         self.metadata = {'name': 'xiaoyou01', 'model_id': 'xiaoyou01', 'voice_id': 'xiaoyou01', 'backend': 'tensorrt_fp32', 'accelerated': True, 'device': 'cuda:0', 'precision': 'FP32',
             'cpu_neural_fallback': False, 'runtime_manifest_sha256': pin, 'source_checkpoint_sha256': SOURCE_SHA,
-            'global_step': 16500, 'jetpack_major': major, 'tensorrt_version': self.pool.version,
+            'global_step': 19500, 'jetpack_major': major, 'tensorrt_version': self.pool.version,
             'limits': self.limits, 'inference_policy': m['inference_policy'],
             'long_profiles_verified': False, 'short_e2e_verified': frontend_acceptance['short_e2e_verified'],
             'normalization_revision': NORMALIZATION_REVISION,
