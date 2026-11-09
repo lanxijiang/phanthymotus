@@ -58,6 +58,19 @@ def _profile_config(perception_root):
         config = yaml.safe_load(stream)
     if not isinstance(config, dict):
         raise ValueError('CONFIG_PATH must contain a configuration mapping')
+    # Darvin assigns each host-network container its own server ports via env.
+    # Bridge only explicit overrides into the private generated configuration.
+    for env_name, key in (('MCP_PORT', 'mcp_port'), ('WS_PORT', 'ws_port')):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            raise ValueError(env_name + ' must be an integer port in 1..65535') from None
+        if not 1 <= port <= 65535:
+            raise ValueError(env_name + ' must be an integer port in 1..65535')
+        config[key] = port
     plugins = config.get('plugins', {})
     if not isinstance(plugins, dict) or any(not isinstance(v, dict) for v in plugins.values()):
         raise ValueError('plugins configuration must contain mappings')
