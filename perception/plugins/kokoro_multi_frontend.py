@@ -86,6 +86,7 @@ _COMMA_NUMBER = re.compile(r"(?<![A-Za-z0-9_.])(?<!\d,)" + _COMMA_NUM + r"(?![A-
 _COMMA_TOKEN = re.compile(_TOKEN.pattern.replace(_NUM, _COMMA_NUM))
 _COMMA_FORMULA_LIKE = re.compile(_FORMULA_LIKE.pattern.replace("_().", "_().,"))
 _RELATIONS = {"=": "equals", "<": "less", ">": "greater", "≤": "le", "≥": "ge", "≠": "ne", "≈": "approx"}
+_EN_MATH_COPULAS = {"is", "are", "was", "were"}
 _IDENTIFIER_CUES = {
     "zh": r"验证码", "ja": r"認証コード|確認コード", "en": r"verification code",
     "ru": r"проверочный код|номер заказа", "de": r"Bestätigungscode",
@@ -472,6 +473,10 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
     for match in _address_matches(text):
         spans.append((match.start(), match.end(), match.group()))
         notes.append(f"notation:protected_literal:{match.group()}")
+    # Keep the programming-language name available for the pronunciation
+    # dictionary; its plus signs are not mathematical operators.
+    for match in re.finditer(r"(?<![A-Za-z0-9_])C\+\+(?![A-Za-z0-9_+])", text):
+        add(match.start(), match.end(), "programming_language", lambda m=match: m.group())
     if language == "en":
         for match in _EN_MONEY.finditer(text):
             def money(m=match):
@@ -590,6 +595,16 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             continue
         compound = re.match(r"[/^²³][A-Za-z0-9µμ°℃²³^/().+\-−]*", text[match.end():])
         if compound:
+            rate = re.match(r"/s(?![A-Za-z0-9_/^²³()+\-−×*÷=<>≤≥≠≈]|\.[A-Za-z0-9_])", text[match.end():])
+            if (language == "en" and unit in {"Gb", "GB"} and rate and
+                    not identifier_prefix.search(text[max(0, match.start()-64):match.start()]) and
+                    not text[:match.start()].rstrip(" \t").endswith(tuple("=<>≤≥≠≈+-−×*÷^²³/")) and
+                    not text[match.end()+rate.end():].lstrip(" \t").startswith(tuple("=<>≤≥≠≈+-−×*÷^²³/"))):
+                end = match.end() + rate.end()
+                spans[:] = [s for s in spans if not (match.start() <= s[0] and s[1] <= end and s[2] == text[s[0]:s[1]])]
+                add(match.start(), end, "data_rate", lambda m=match, u=unit:
+                    _quantity(m["n"], u, "en", cfg) + " per " + cfg["units"]["second"]["en"][0])
+                continue
             end = match.end() + compound.end()
             # A suffix such as /s may already be protected as a path. Merge
             # only unchanged literals into this larger literal span.
@@ -648,9 +663,24 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
         start, end = match.start(), match.end()
         while end > start and text[end-1] in ("., \t" if language in _COMMA_LANGUAGES else ". \t"):
             end -= 1
+        if language == "en" and text[:start].rstrip(" \t").endswith(("^", "²", "³", "(")):
+            continue
         if overlaps(start, end):
             continue
         raw = text[start:end]
+        leadin = re.match(r"([A-Za-z]+)[ \t]+(?=[+\-−(0-9])", raw) if language == "en" else None
+        if leadin and (len(leadin[1]) > 3 or leadin[1].lower() in _EN_MATH_COPULAS):
+            # Parse the following expression, not a verb such as "solve" or "is".
+            start += leadin.end()
+            expression = formula_pattern.match(text, start)
+            if expression is None:
+                continue
+            end = expression.end()
+            while end > start and text[end-1] in ". \t":
+                end -= 1
+            if overlaps(start, end):
+                continue
+            raw = text[start:end]
         mathematical = any(op in raw for op in "=<>≤≥≠≈^²³×·*/÷") or any(
             cue in _context(text, start, end) for cue in cfg["math_cues"][language])
         parsed = raw.replace("‑", "-") if mathematical else raw
@@ -677,6 +707,9 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
     tokens = list(token_pattern.finditer(text))
     for first, token in enumerate(tokens):
         if overlaps(token.start(), token.end()):
+            continue
+        if (language == "en" and token.group().lower() in _EN_MATH_COPULAS and
+                re.match(r"[ \t]+[+\-−(0-9]", text[token.end():])):
             continue
         best = None
         for last in range(first + 1, min(first + 40, len(tokens))):
@@ -706,6 +739,13 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
         if best:
             end, node = best
             add(token.start(), end, "math", lambda node=node: _speak_math(node, language, cfg))
+    if language == "en":
+        for match in re.finditer(r"(?<![A-Za-z0-9_./+\-−])(?P<sign>[+\-−])[ \t]*(?P<n>" +
+                                 _NUM + r")(?![A-Za-z0-9_]|\.[A-Za-z0-9_])", text):
+            if identifier_prefix.search(text[max(0, match.start()-64):match.start()]):
+                continue
+            add(match.start(), match.end(), "signed_number",
+                lambda m=match: _number(m["sign"] + m["n"], "en", cfg))
     numbers = list(number_pattern.finditer(text))
     if language in _COMMA_LANGUAGES:
         # Two commas identify an ambiguous list, not a single decimal. Retain
@@ -751,15 +791,17 @@ _LATIN_WORD = (rf"[{_LATIN_LETTERS}][{_LATIN_LETTERS}0-9]*"
                rf"(?:[-'&][{_LATIN_LETTERS}0-9]+)*")
 _LATIN = re.compile(r"(" + _LATIN_WORD + r"(?:[ \t]+(?:&[ \t]+)?" + _LATIN_WORD + r")*)")
 _SYMBOL_MAP = {"ru": {"ɭ": "l", "ɵ": "o", "ʑ": "zʲ"}, "de": {"ʏ": "y"}}
-_STOPS = re.compile(r'[.!?…;:,—][)\]”"]*\s*')
+_CLOSERS = r'''[)\]}'"’”」』】》]*'''
+_STOPS = re.compile(r'(?:[!?…。！？;；:：,，、—]+|\.(?![\w.]))' + _CLOSERS + r'\s*')
+_SENTENCE_STOPS = re.compile(r'(?:[!?…。！？]+|\.(?![\w.]))' + _CLOSERS + r'\s*')
 
 
 def phoneme_chunks(phones, limit=220, preferred=180, first_limit=0):
     """Split only at whole-word/punctuation boundaries, retaining every phone.
 
-    Keep the opening phrase together by default. No phone is truncated to make
-    a TensorRT profile fit. Callers may retry with a smaller ``limit`` when the
-    predicted duration exceeds the vocoder profile.
+    ``first_limit`` is a soft latency target: a nearby whole word takes
+    precedence over emitting a tiny opening fragment. No phone is truncated
+    to make a TensorRT profile fit.
     """
     if not 1 <= preferred <= limit <= 510 or not 0 <= first_limit <= limit:
         raise ValueError("Invalid Kokoro Multi phoneme chunk limits")
@@ -771,7 +813,7 @@ def phoneme_chunks(phones, limit=220, preferred=180, first_limit=0):
         if len(remaining) <= (first_limit if first else limit):
             chunks.append(remaining)
             break
-        stops = [m.end() for m in _STOPS.finditer(remaining[:limit])]
+        stops = [m.end() for m in _STOPS.finditer(remaining) if m.end() <= limit]
         words = [m.end() for m in re.finditer(r"\s+", remaining[:limit])]
         # A leading quote or parenthesis is not a speakable first fragment.
         boundaries = sorted({end for end in stops + words
@@ -779,7 +821,9 @@ def phoneme_chunks(phones, limit=220, preferred=180, first_limit=0):
         if first:
             early = [end for end in boundaries if end <= first_limit]
             phrase = [end for end in stops if first_limit // 2 <= end <= first_limit]
-            end = max(phrase or early) if (phrase or early) else (boundaries[0] if boundaries else None)
+            substantial = [end for end in boundaries if end >= first_limit // 2]
+            choices = phrase or [end for end in early if end >= first_limit // 2] or substantial or boundaries
+            end = min(choices, key=lambda value: abs(value - first_limit)) if choices else None
         else:
             natural = [end for end in stops if preferred // 2 <= end <= limit]
             choices = natural or boundaries
@@ -794,7 +838,7 @@ def phoneme_chunks(phones, limit=220, preferred=180, first_limit=0):
 
 
 def sentence_parts(phones):
-    ends = [0, *[m.end() for m in re.finditer(r'[.!?…][)\]”"]*\s+', phones)], len(phones)]
+    ends = [0, *[m.end() for m in _SENTENCE_STOPS.finditer(phones)], len(phones)]
     return [phones[start:end].strip() for start, end in zip(ends, ends[1:])
             if phones[start:end].strip()]
 
@@ -807,13 +851,13 @@ def sentence_phoneme_chunks(phones):
         if chunks and len(chunks[-1]) + len(parts[0]) + 1 <= 220:
             chunks[-1] += " " + parts.pop(0)
         chunks.extend(parts)
-    if chunks:
-        # Allow a nearby sentence end, or an earlier complete opening clause,
-        # instead of resetting prosody in the middle of a phrase.
-        opening = [m for m in _STOPS.finditer(chunks[0][:100])
-                   if m.end() >= 24]
+    if chunks and len(chunks[0]) > 120:
+        # Keep a short utterance intact. For a longer opening, 80 is a latency
+        # target, with room for a nearby complete clause rather than a hard cut.
+        opening = [m for m in _STOPS.finditer(chunks[0])
+                   if 40 <= m.end() <= 120]
         if opening:
-            sentences = [m for m in opening if m.group()[0] in ".!?…"]
+            sentences = [m for m in opening if m.group()[0] in ".!?…。！？"]
             end = min(sentences or opening, key=lambda m: abs(m.end() - 80)).end()
             chunks[:1] = [part for part in (chunks[0][:end].strip(),
                                           chunks[0][end:].strip()) if part]
@@ -893,6 +937,8 @@ class Frontend:
         self._english = EnglishG2P(british=False, fallback=espeak.EspeakFallback(british=False))
         for word, overrides in lexicon.get("pos_overrides", {}).items():
             self._english.lexicon.golds[word].update(overrides)
+        self._read_present = self._english.lexicon.golds["read"]["DEFAULT"]
+        self._lead_metal = self._english.lexicon.golds["led"]
         self._japanese, self._sandhi = Cutlet(), ToneSandhi()
         available = EspeakBackend.supported_languages()
         french = next(code for code in ("fr-fr", "fr") if code in available)
@@ -915,7 +961,7 @@ class Frontend:
         alternatives.sort(reverse=True)
         self._terms = re.compile(r"(?<![A-Za-z0-9_])(?:" +
                                  "|".join(body for _, body in alternatives) +
-                                 r")(?![A-Za-z0-9_])")
+                                 r")(?![A-Za-z0-9_]|\.[A-Za-z0-9_])")
         # Load lazy corpora before the first queued utterance, without running a
         # neural model or downloading resources during requests.
         for language, text in zip(LANGUAGES, (
@@ -964,6 +1010,34 @@ class Frontend:
             parts.append(self._english.lexicon.get_NNP(text)[0]
                          if letters else self._english(text)[0])
         return " ".join(parts)
+
+    def _english_context_readings(self, text, protected, source_text):
+        protected = [*protected, *(m.span() for m in _PHONE_HINT.finditer(text))]
+        calendar = re.search(r"\b(?:in|during)\s+(?:the year\s+)?\d{4}\b", source_text, re.I)
+        readings = []
+        for match in re.finditer(r"\b(read|lead)\b", text, re.I):
+            if any(match.start() < end and match.end() > start for start, end in protected):
+                continue
+            before, after = text[:match.start()], text[match.end():]
+            left = re.split(r"[.!?;\n]", before)[-1]
+            right = re.split(r"[.!?;\n]", after, 1)[0]
+            clause = left + match[0] + right
+            if match[0].lower() == "read":
+                habitual = re.search(r"\b(?:every|each) (?:day|morning|week)\b|\b(?:daily|usually|regularly)\b", clause, re.I)
+                subject = re.fullmatch(r"\s*(?:(?:every|each) (?:day|morning|week)[,\s]+)?"
+                                       r"(?:I|we|you|they)\s+(?:(?:usually|often|regularly)\s+)?", left, re.I)
+                past = re.search(r"\b(?:yesterday|ago|last|had|did|was|were)\b|\bused\s+to\b|"
+                                 r"\b(?:in|during)\s+(?:the year\s+)?\d{4}\b|"
+                                 r"\b(?:before|after|when|until|while)\s+(?:I|we|you|they|he|she|it)\b", clause, re.I)
+                if habitual and subject and not past and not calendar:
+                    readings.append((*match.span(), self._read_present))
+            elif (re.match(r"\s+(?:pipes?|paint|poisoning|metal)\b", right, re.I) or
+                  re.search(r"\bpipes?\s+(?:contain|contains|contained)\s+$", left, re.I) or
+                  (re.search(r"\b(?:metal|element)\s+$", left, re.I) and
+                   re.match(r"\s+(?:is|has|was)\b|\s*$", right, re.I))):
+                # Metal lead and the native dictionary's "led" have the same reading.
+                readings.append((*match.span(), self._lead_metal))
+        return readings
 
     def _chinese(self, text):
         import cn2an
@@ -1053,12 +1127,29 @@ class Frontend:
                                   for start, end in protected)]
             cursor, parts = 0, []
             if language == "en":
-                for match in matches:
-                    parts.extend((self._expand_literal_symbols(spoken[cursor:match.start()], language),
-                                  "[" + match[0] + "](/" + self._entries[match.lastgroup] + "/)"))
-                    cursor = match.end()
+                readings = [(match.start(), match.end(), self._entries[match.lastgroup]) for match in matches]
+                readings += self._english_context_readings(spoken, protected + [match.span() for match in matches], text)
+                for start, end, phones in sorted(readings):
+                    parts.extend((self._expand_literal_symbols(spoken[cursor:start], language),
+                                  "[" + spoken[start:end] + "](/" + phones + "/)"))
+                    cursor = end
                 parts.append(self._expand_literal_symbols(spoken[cursor:], language))
                 return self._english("".join(parts))[0]
+
+            compounds = []
+            for word in re.finditer(_LATIN_WORD, spoken):
+                if "-" not in word[0] or any(word.start() < end and word.end() > start for start, end in protected):
+                    continue
+                hits = [match for match in matches if word.start() <= match.start() and match.end() <= word.end()]
+                if not hits or any(match.span() == word.span() for match in hits):
+                    continue
+                if language in ("zh", "ja", "ru", "th") or re.fullmatch(r"[A-Za-z]+\d+-TTS", word[0]):
+                    # Keep the whole English compound in one G2P call.  Splitting
+                    # F5-TTS at TTS leaves a dangling hyphen in the native branch.
+                    compounds.append((word.start(), word.end(), self.convert(word[0], "en")))
+                    matches = [match for match in matches if match not in hits]
+            readings = sorted([(match.start(), match.end(), self._entries[match.lastgroup])
+                               for match in matches] + compounds)
 
             def plain(value):
                 # Lexical matches were already selected against the intact
@@ -1070,9 +1161,13 @@ class Frontend:
                         lang = "en" if language in ("zh", "ja", "ru", "th") and _LATIN.fullmatch(piece) else language
                         parts.append(self._native(piece, lang))
 
-            for match in matches:
-                plain(spoken[cursor:match.start()])
-                parts.append(self._entries[match.lastgroup])
-                cursor = match.end()
+            for start, end, phones in readings:
+                prefix = spoken[cursor:start]
+                article = re.search(r"(?<!\w)[lL]['’]$", prefix) if language == "fr" else None
+                # French l' is an elided article attached to the following
+                # name, not an isolated letter L for eSpeak to spell aloud.
+                plain(prefix[:article.start()] if article else prefix)
+                parts.append(("l" if article else "") + phones)
+                cursor = end
             plain(spoken[cursor:])
             return " ".join(parts)

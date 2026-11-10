@@ -295,12 +295,7 @@ class KokoroMultiTTSAdapter(TTSAdapter):
             unknown -= decorations
         if unknown:
             raise ValueError(f"Kokoro Multi unsupported phonemes ({language}): {sorted(unknown)}")
-        if language in {"en", "de", "fr", "es"}:
-            chunks = sentence_phoneme_chunks(phones)
-        else:
-            chunks = phoneme_chunks(phones)
-            if chunks:
-                chunks[:1] = phoneme_chunks(chunks[0], first_limit=80)
+        chunks = sentence_phoneme_chunks(phones)
         samples, count = 0, 0
         while chunks:
             part = chunks.pop(0)
@@ -312,7 +307,7 @@ class KokoroMultiTTSAdapter(TTSAdapter):
             except SequenceTooLong:
                 # Nothing from this chunk has been published. Keep complete
                 # sentences before reducing to smaller word groups.
-                smaller = sentence_parts(part) if language in {"en", "de", "fr", "es"} else [part]
+                smaller = sentence_parts(part)
                 if len(smaller) == 1:
                     limit = len(part) // 2
                     if limit < 1:
@@ -342,9 +337,9 @@ class KokoroMultiTTSAdapter(TTSAdapter):
 WORK = Path(__file__).resolve().parents[1]
 # Filled with the published, immutable release before submission. Missing pins
 # fail explicitly; an unverified or unrelated model is never substituted.
-ASSET_URL = "https://www.modelscope.cn/api/v1/models/lanxijiang/Kokoro-Multi-TRT-JP61/repo?Revision=391a364ea99b5f8b08da0adc9ca10d55347812a4&FilePath=kokoro-multi-jp61-fp32-v5.tar.gz"
-ASSET_SHA256 = "153a44746c5a3b3027100bb178ba1a98da000422c116d231bf1b8e39a4da8433"
-ASSET_SIZE = 230687712
+ASSET_URL = "https://www.modelscope.cn/api/v1/models/lanxijiang/Kokoro-Multi-TRT-JP61/repo?Revision=883bd663c27f6de80aa15cec173c3242aefbbc6a&FilePath=kokoro-multi-jp61-fp32-v6.tar.gz"
+ASSET_SHA256 = "9e3484a47d1cc92d360e5a945bd940b7302433c8032a849f805e73b370f4ffc1"
+ASSET_SIZE = 230687147
 
 
 def enabled():
