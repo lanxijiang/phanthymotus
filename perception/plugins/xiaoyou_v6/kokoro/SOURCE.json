@@ -1,0 +1,36 @@
+{
+  "upstream": "https://github.com/hexgrad/kokoro",
+  "modifications": "The hashes below record the local approved v1.0 mathematical reference and namespace import changes. Production inference uses separate FP32 TensorRT plans with its own runtime and frontend; the native model modules are excluded from the code submission.",
+  "files": {
+    "model.py": {
+      "source_sha256": "b56d168af83994872d28cd94a032d58f0f2494ae77cca67e6ab52d5f1ea4309b",
+      "vendored_sha256": "b56d168af83994872d28cd94a032d58f0f2494ae77cca67e6ab52d5f1ea4309b",
+      "shipped_in_gpu_source_delivery": false
+    },
+    "modules.py": {
+      "source_sha256": "6e14dadc706efc9a8d90e8b4919d45d57342555b242c642cd26f26c65eedc085",
+      "vendored_sha256": "6e14dadc706efc9a8d90e8b4919d45d57342555b242c642cd26f26c65eedc085",
+      "shipped_in_gpu_source_delivery": false
+    },
+    "istftnet.py": {
+      "source_sha256": "7a67c5ebfc6cfd9afe87aafa39b4d213c31416b7dfee0905b9793e4b4ae1f2cc",
+      "vendored_sha256": "a9ef0661d82250ef5a40af934c9ec9104e9eca40d339614367b30634c61c44d5",
+      "shipped_in_gpu_source_delivery": false
+    },
+    "custom_stft.py": {
+      "source_sha256": "94fed3f9ac22bba31135bf8c4ea795762c7ab3ff44f1984d11e7babf27462d69",
+      "vendored_sha256": "94fed3f9ac22bba31135bf8c4ea795762c7ab3ff44f1984d11e7babf27462d69",
+      "shipped_in_gpu_source_delivery": false
+    },
+    "LICENSE": {
+      "source_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "vendored_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "shipped_in_gpu_source_delivery": true
+    }
+  },
+  "deployment_scope": "GPU delivery includes only this provenance record and LICENSE from this subdirectory. The four native neural Python files are local numerical-reference sources, not imported or shipped by the JP6 runtime.",
+  "additional_source_chain": {
+    "istftnet_reference": "https://github.com/yl4579/StyleTTS2/blob/main/Modules/istftnet.py",
+    "use": "Upstream source attribution recorded in the native reference; native file is not part of the GPU delivery."
+  }
+}

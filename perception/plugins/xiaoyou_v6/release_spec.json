@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "model_id": "xiaoyou01",
+  "voice_id": "01yuewen",
+  "modelscope_repo": "lanxijiang/xiaoyou01",
+  "modelscope_revision": "c69336da54cdbf0be87b25d33d34b89e97de2938",
+  "modelscope_file": "01yuewen-jp6-fp32-three-plan-26523-20261112-v1.tar.gz",
+  "asset_bytes": 317341540,
+  "asset_sha256": "a0bfbb3ced42bc89f5463ca338c28c18c6467aa2fde0da8bceae6539ade1a22e",
+  "runtime_manifest_sha256": "4bd7ad8f928604005fda29f8f9add92b3a42be1619ef71048c177510959fbbf2",
+  "model_dir": "/models/01yuewen",
+  "published": true,
+  "environment_mapping": {
+    "modelscope_repo": "XIAOYOU_V6_MODELSCOPE_REPO",
+    "modelscope_revision": "XIAOYOU_V6_MODELSCOPE_REVISION",
+    "modelscope_file": "XIAOYOU_V6_MODELSCOPE_FILE",
+    "asset_bytes": "XIAOYOU_V6_ASSET_BYTES",
+    "asset_sha256": "XIAOYOU_V6_ASSET_SHA256",
+    "runtime_manifest_sha256": "XIAOYOU_V6_RUNTIME_MANIFEST_SHA256",
+    "model_dir": "XIAOYOU_V6_MODEL_DIR"
+  },
+  "english_model": {
+    "file": "frontend/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "bytes": 12806118,
+    "sha256": "1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85",
+    "runtime_network_download": false
+  },
+  "project_version": "xiaoyou_v6",
+  "publication_note": "Three-plan FP32 Darvin resource candidate. Full immutable archive SHA/size anonymously verified. Measured backend TTFT<1 not met; MCP pending; Darvin unscored.",
+  "status": "published_01yuewen26523_three_plan_Darvin_candidate_pending",
+  "global_step": 26523,
+  "source_checkpoint_sha256": "a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0",
+  "release_acceptance": {
+    "release_mode": "darvin_candidate",
+    "ttft_lt1": false,
+    "backend_min_TTFT_seconds": 1.0805068521294743,
+    "backend_max_TTFT_seconds": 1.3612843190785497,
+    "backend_max_RTF_unpaced": 0.09354308884090308,
+    "backend_RTF_lt1": true,
+    "MCP_status": "pending",
+    "MCP_tested": false,
+    "darvin_scored": false,
+    "darvin_passed": false,
+    "original_gold_parity_claimed": false
+  },
+  "ttft_lt1": false,
+  "MCP_status": "pending"
+}

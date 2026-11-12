@@ -1,0 +1,28 @@
+{
+  "kind": "portable_01yuewen_frontend_base",
+  "source_student_profile_sha256": "4c8e1a4a9e0c57162528b0a3edc0964468a9ecc053bf405957e11fc4ef576549",
+  "source_files": {
+    "v6_frontend_base.py": {
+      "profile_sha256": "65568e99370ffcdba21d4f05e725df3efd32e02322717b4b58d09c2af3828887"
+    },
+    "text_normalization.py": {
+      "profile_sha256": "9b15c1dfb760e0d4188201c407b1d45c5a0f48145843d2f06372a75acda590a0"
+    },
+    "http_status_codes.py": {
+      "profile_sha256": "1e73e9b3e628c66021cf626679717eae35ffcb9cff1e626657c3dd7cd7af1842"
+    },
+    "math_normalization.py": {
+      "profile_sha256": "6f38080b448dd7f0974a3d18739e9f7e8856701dac5e88809126e4c76d4a2381"
+    },
+    "context_pronunciation.py": {
+      "profile_sha256": "e0f8dfbe5270eb890e879c1f57df3fde6494ca2017def36e10875e44d38132dc"
+    },
+    "v6_terms.json": {
+      "profile_sha256": "3a0f34ad00099a1041a8f9e40e30802c08822049c20d9dfbb74905f8fe91dff4"
+    },
+    "__init__.py": {
+      "profile_sha256": "ef867cb875bb64efbf5fb413226d8a9787be4385d09c97edcc3476fa76a104ad"
+    }
+  },
+  "developer_or_training_path_required": false
+}
