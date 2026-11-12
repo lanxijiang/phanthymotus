@@ -506,6 +506,12 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
                 suffix = "T I" if (m["suffix"] or "").lower() == "ti" else (m["suffix"] or "")
                 return (m["family"].upper() + m["n"] + " " + suffix).strip()
             add(match.start(), match.end(), "english_hardware_model", hardware)
+    elif language == "zh":
+        for match in _EN_HARDWARE.finditer(text):
+            def hardware(m=match):
+                suffix = "T I" if (m["suffix"] or "").lower() == "ti" else (m["suffix"] or "")
+                return (m["family"].upper() + " " + _digits(m["n"], "zh", cfg) + " " + suffix).strip()
+            add(match.start(), match.end(), "chinese_hardware_model", hardware)
     for match in _VERSION.finditer(text):
         value = match.group("v1") or match.group("v2")
         start = match.start("v1") if match.group("v1") else match.start("v2")
@@ -1150,7 +1156,7 @@ class Frontend:
                         complement = words[index + 2][1] in {"a", "ad"}
                     if previous_pos.startswith("v") and complement:
                         phones[0] = "de5"
-                elif word == "长" and previous in {"耗时", "更"}:
+                elif word == "长" and previous in {"耗时", "更", "较", "比较"}:
                     phones[0] = "chang2"
                 if index + 1 in modal_de and phones[-1].endswith("3"):
                     phones[-1] = phones[-1][:-1] + "2"
