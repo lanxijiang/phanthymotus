@@ -1,8 +1,8 @@
 """Resident Kokoro Multi text normalization, pronunciation dictionaries and G2P.
 
 All language resources remain in the verified external release. Thai tones and
-Russian/German substitutions preserve the audition baseline; native review is
-still required. No TTSV4 source or acoustic weights are imported here.
+Russian/German substitutions retain the legacy114-symbol audition baseline.
+The trained119-symbol release preserves native phonemes; review is still required. No TTSV4 source or acoustic weights are imported here.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ _ADDRESS = re.compile(
     re.IGNORECASE,
 )
 _VERSION = re.compile(
-    r"(?:(?P<label>\b(?:version|ver\.?|versión|версия)\s*|版本\s*|バージョン\s*|เวอร์ชัน\s*|รุ่น\s*)(?P<v1>[vV]?\d+(?:\.\d+)+)|"
+    r"(?:(?P<label>\b(?:version|ver\.?|versión|верси(?:я|и|ю|ей|й))\s*|版本\s*|バージョン\s*|เวอร์ชัน\s*|รุ่น\s*)(?P<v1>[vV]?\d+(?:\.\d+)+)|"
     r"(?<![A-Za-z0-9_.])(?P<v2>[vV]\d+(?:\.\d+)+))(?![A-Za-z0-9_]|\.[A-Za-z0-9_])", re.IGNORECASE,
 )
 _DATE = re.compile(r"(?<![A-Za-z0-9_.\-])\d{4}-\d{2}-\d{2}(?![A-Za-z0-9_\-]|\.[A-Za-z0-9_])")
@@ -89,7 +89,7 @@ _RELATIONS = {"=": "equals", "<": "less", ">": "greater", "≤": "le", "≥": "g
 _EN_MATH_COPULAS = {"is", "are", "was", "were"}
 _IDENTIFIER_CUES = {
     "zh": r"验证码", "ja": r"認証コード|確認コード", "en": r"verification code",
-    "ru": r"проверочный код|номер заказа", "de": r"Bestätigungscode",
+    "ru": r"проверочный код|код подтверждения|номер заказа", "de": r"Bestätigungscode",
     "fr": r"code de vérification(?: fictif)?|numéro de commande",
     "es": r"código de verificación(?: ficticio)?|número de pedido",
     "th": r"รหัสยืนยัน(?:สมมติ)?|หมายเลขคำสั่งซื้อ",
@@ -115,6 +115,10 @@ def _config():
         "zh": ["百分之"], "en": ["percent"], "ja": ["パーセント"],
         "ru": ["процент", "процента", "процентов"], "de": ["Prozent"],
         "fr": ["pour cent"], "es": ["por ciento"], "th": ["ร้อยละ"]})
+    cfg["units"].setdefault("GHz", {
+        "zh": ["吉赫兹"], "en": ["gigahertz"], "ja": ["ギガヘルツ"],
+        "ru": ["гигагерц", "гигагерца", "гигагерц"], "de": ["Gigahertz"],
+        "fr": ["gigahertz"], "es": ["gigahercios"], "th": ["กิกะเฮิรตซ์"]})
     cfg["unit_symbol_aliases"].setdefault("％", "%")
     templates = cfg.setdefault("quantity_templates", {}).setdefault("%", {})
     for lang, template in (("zh", "百分之{number}"), ("th", "ร้อยละ{number}")):
@@ -312,7 +316,7 @@ def _quantity(value, unit, language, cfg, genitive_decimal=False):
     return template.format(number=words, unit=unit_words) if template else _join([words, unit_words], language)
 
 
-def _date(raw, language, cfg):
+def _date(raw, language, cfg, *, german_dative=False):
     year, month, day = map(int, raw.split("-"))
     date(year, month, day)  # Gregorian validation, including leap years.
     if language == "zh":
@@ -325,7 +329,7 @@ def _date(raw, language, cfg):
         return f"{d} {cfg['months'][language][month-1]} {y} года"
     d = _integer(day, language, to="ordinal") if language in {"en", "de"} else _integer(day, language)
     if language == "de":
-        d += "r"
+        d += "n" if german_dative else "r"
     if language == "fr" and day == 1:
         d = "premier"
     return cfg["date_templates"][language].format(day=d, month=cfg["months"][language][month-1], year=_integer(year, language))
@@ -523,7 +527,28 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
         if any(cue in local for cue in ("พ.ศ.", "佛历", "佛曆", "buddhist")):
             add(match.start(), match.end(), "calendar_requires_context", lambda m=match: m.group())
         else:
-            add(match.start(), match.end(), "iso_date", lambda m=match: _date(m.group(), language, cfg))
+            dative = language == "de" and bool(re.search(r"\bam\s*$", text[:match.start()], re.I))
+            add(match.start(), match.end(), "iso_date",
+                lambda m=match, d=dative: _date(m.group(), language, cfg, german_dative=d))
+    if language == "de":
+        for match in re.finditer(r"\bam\s+(?P<day>\d{1,2})\.(?P<month>\d{1,2})\."
+                                 r"(?P<year>\d{4})(?![A-Za-z0-9_]|\.\d)", text, re.I):
+            raw = f"{match['year']}-{match['month']}-{match['day']}"
+            add(match.start("day"), match.end("year"), "german_date",
+                lambda value=raw: _date(value, language, cfg, german_dative=True))
+    if language == "en":
+        months = "|".join(re.escape(month) for month in cfg["months"]["en"])
+        for match in re.finditer(r"\b(?P<month>" + months + r")\s+(?P<day>\d{1,2})"
+                                 r"(?:st|nd|rd|th)?(?![A-Za-z0-9_.])", text, re.I):
+            year = re.match(r"(?:[ \t]*,[ \t]*|[ \t]+)(\d{4})(?!\d)", text[match.end():])
+            date_cue = re.search(r"\b(?:on|dated|date(?: is)?)\s*$", text[:match.start()], re.I)
+            if not year and not date_cue:
+                continue
+            def named_date(m=match, y=int(year[1]) if year else 2000):
+                month = [name.lower() for name in cfg["months"]["en"]].index(m["month"].lower()) + 1
+                date(y, month, int(m["day"]))
+                return m["month"] + " " + _integer(int(m["day"]), "en", to="ordinal")
+            add(match.start(), match.end(), "english_named_date", named_date)
     for match in _DATE_LIKE.finditer(text):
         add(match.start(), match.end(), "ambiguous_date_format", lambda m=match: m.group())
     for match in _IPV4.finditer(text):
@@ -556,6 +581,10 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
         end = match.end()
         if language == "th" and not duration:
             suffix = re.match(r"[ \t]*นาฬิกา", text[end:])
+            if suffix:
+                end += suffix.end()
+        elif language == "de" and not duration:
+            suffix = re.match(r"[ \t]*Uhr\b", text[end:], re.I)
             if suffix:
                 end += suffix.end()
         add(match.start(), end, "duration" if duration else "clock", lambda m=match, d=duration: _clock(m.group(), d, language, cfg))
@@ -763,6 +792,17 @@ def normalize_notation(text: str, language: str) -> tuple[str, list[str]]:
             add(match.start(), match.end(), "ambiguous_comma_fragment", lambda m=match: m.group())
         elif match.group().isdigit() and (phone or identifier_prefix.search(prefix)):
             add(match.start(), match.end(), "identifier_digits", lambda m=match: _digits(m.group(), language, cfg))
+        elif (language == "zh" and re.fullmatch(r"[1-9]\d{3}", match.group())
+              and re.match(r"[ \t]*年", text[match.end():])
+              and not re.search(r"(?:[+\-−=<>≤≥≠≈×*/^]|负|正)[ \t]*$", prefix)
+              and (re.match(r"[ \t]*年[ \t]*\d{1,2}月", text[match.end():])
+                   or (not re.search(r"(?:每|隔|持续|运行|历时|历经|经过|累计|长达|为期|"
+                                     r"周期|寿命|保修|服役|使用|已有)(?:了|为)?[ \t]*(?:约|近)?[ \t]*$", prefix)
+                       and not re.match(r"[ \t]*年(?:期|率|整|历史|之久|左右|以上|以内|一遇|[/^²³])",
+                                        text[match.end():])))):
+            # Calendar years use digit readings; elapsed years remain quantities.
+            add(match.start(), match.end(), "calendar_year",
+                lambda m=match: _digits(m.group(), language, cfg))
         elif len(match.group()) > 1 and match.group().startswith("0") and match.group()[1].isdigit():
             add(match.start(), match.end(), "ambiguous_leading_zero_number", lambda m=match: m.group())
         else:
@@ -844,25 +884,22 @@ def sentence_parts(phones):
 
 
 def sentence_phoneme_chunks(phones):
-    """Pack complete sentences before falling back to clause/word boundaries."""
-    chunks = []
+    """Pack whole sentences; split long ones without mixing their fragments."""
+    chunks, pending = [], ""
     for sentence in sentence_parts(phones):
-        parts = phoneme_chunks(sentence)
-        if chunks and len(chunks[-1]) + len(parts[0]) + 1 <= 220:
-            chunks[-1] += " " + parts.pop(0)
-        chunks.extend(parts)
-    if chunks and len(chunks[0]) > 120:
-        # Keep a short utterance intact. For a longer opening, 80 is a latency
-        # target, with room for a nearby complete clause rather than a hard cut.
-        opening = [m for m in _STOPS.finditer(chunks[0])
-                   if 40 <= m.end() <= 120]
-        if opening:
-            sentences = [m for m in opening if m.group()[0] in ".!?…。！？"]
-            end = min(sentences or opening, key=lambda m: abs(m.end() - 80)).end()
-            chunks[:1] = [part for part in (chunks[0][:end].strip(),
-                                          chunks[0][end:].strip()) if part]
+        if len(sentence) > 220:
+            if pending:
+                chunks.append(pending)
+                pending = ""
+            chunks.extend(phoneme_chunks(sentence))
+        elif pending and len(pending) + len(sentence) + 1 <= 220:
+            pending += " " + sentence
         else:
-            chunks[:1] = phoneme_chunks(chunks[0], first_limit=80)
+            if pending:
+                chunks.append(pending)
+            pending = sentence
+    if pending:
+        chunks.append(pending)
     return chunks
 
 
@@ -893,6 +930,10 @@ class Frontend:
 
     def __init__(self, model_dir):
         model_dir = Path(model_dir)
+        vocab_path = model_dir / "vocab.json"
+        vocab = json.loads(vocab_path.read_text()) if vocab_path.is_file() else {}
+        self._native_symbols = all(vocab.get(symbol) == token for symbol, token in
+                                   {"ʏ": 7, "ɭ": 8, "ɵ": 26, "ʑ": 27, "↑": 170}.items())
         # The release vendors only FastThai's pure Python code and offline data.
         # Compiled ARM dependencies come from the image's pinned requirements.
         extra = model_dir / "frontend_data"
@@ -950,8 +991,20 @@ class Frontend:
         self._thai._tokenizer._dict = self._thai._tokenizer.vocab | set(overrides)
         self._thai._tokenizer._engine = Tokenizer(
             custom_dict=self._thai._tokenizer.vocab, engine="newmm")
+        entries = {e["term"]: dict(e) for e in lexicon["entries"] if e["enabled"]}
+        for term, spoken in (("AI", "A I"), ("Whisper", "whisper"),
+                             ("CosyVoice", "cosy voice"), ("Kokoro", "Kokoro"),
+                             ("XTTS", "X T T S"), ("XTTS-v2", "X T T S V two"),
+                             ("CER", "C E R"), ("VAD", "V A D"),
+                             ("large-v3", "large V three"), ("large-v3-turbo", "large V three turbo"),
+                             ("1X Technologies", "one X technologies")):
+            entries.setdefault(term, {"term": term, "spoken_english": spoken,
+                                      "aliases": [], "case_sensitive": True})
+        for term, alias in (("AI", "A I"), ("SageAIOS", "Sage A I O S")):
+            if term in entries:
+                entries[term]["aliases"] = list(dict.fromkeys([*entries[term]["aliases"], alias]))
         alternatives, self._entries = [], {}
-        for index, entry in enumerate(e for e in lexicon["entries"] if e["enabled"]):
+        for index, entry in enumerate(entries.values()):
             for form in [entry["term"], *entry["aliases"]]:
                 name = f"w{index}_{len(alternatives)}"
                 body = re.escape(form).replace(r"\ ", r"[ \t]+")
@@ -986,6 +1039,11 @@ class Frontend:
             return "zh"
         if re.fullmatch(r"(?:Hallo|Danke)[.!?…]*", text.strip(), re.I):
             return "de"
+        greeting = text.strip(" \t\r\n.!?…¡¿").lower()
+        if greeting in {"bonjour", "bonsoir", "merci", "salut"}:
+            return "fr"
+        if greeting in {"hola", "gracias", "buenas tardes", "buenas noches"}:
+            return "es"
         ordinary = self._terms.sub(" ", text)
         ordinary = re.sub(r"(?<!\w)IP(?:v[46])?(?!\w)", " ", ordinary, flags=re.I)
         spans = protected_spans(ordinary)
@@ -1037,13 +1095,24 @@ class Frontend:
                    re.match(r"\s+(?:is|has|was)\b|\s*$", right, re.I))):
                 # Metal lead and the native dictionary's "led" have the same reading.
                 readings.append((*match.span(), self._lead_metal))
+        for match in re.finditer(r"\b([aApP])\.[mM]\.(?=\s*$|\s+(?:Which|Please|Then|We|It|This|That|I)\b)", text):
+            if not any(match.start() < end and match.end() > start for start, end in protected):
+                # Preserve an explicit sentence stop in the native phone hint;
+                # spaCy otherwise folds the final dot into the abbreviation.
+                readings.append((match.start(), match.end(),
+                                 self._english.lexicon.get_NNP(match[1].upper() + "M")[0] + "."))
         return readings
 
     def _chinese(self, text):
         import cn2an
-        import jieba
+        import jieba.posseg as psg
         from misaki.zh import ZHG2P
         from pypinyin import lazy_pinyin, Style
+        readings = {
+            "认识": ("ren4", "shi5"), "很长": ("hen3", "chang2"),
+            "长时间": ("chang2", "shi2", "jian1"),
+            "最长": ("zui4", "chang2"), "重试": ("chong2", "shi4"),
+        }
         # A transliterated name's middle dot is a word boundary, not a phone.
         text = re.sub(r"(?<=[\u4e00-\u9fff])·(?=[\u4e00-\u9fff])", " ", text)
         text = ZHG2P.map_punctuation(cn2an.transform(text, "an2cn"))
@@ -1052,11 +1121,49 @@ class Frontend:
             if not re.fullmatch(r"[\u4e00-\u9fff]+", span):
                 parts.append(span)
                 continue
+            words = [(word, pos) for word, pos in psg.lcut(span)]
+            modal_de = {
+                index for index, (word, pos) in enumerate(words)
+                if (not index or words[index - 1][0] in {
+                    "还", "必须", "我", "你", "他", "她", "我们", "你们", "他们"})
+                and ((word == "得" and pos == "ud" and index + 1 < len(words)
+                      and words[index + 1][0] in {"先", "尽快", "重新", "重新启动", "重试"})
+                     or (word == "得去" and pos == "v"))
+            }
+            # Retain pypinyin's phrase context, including phrases Jieba splits differently.
+            contextual = lazy_pinyin(span, style=Style.TONE3, neutral_tone_with_five=True,
+                                     errors=lambda unknown: list(unknown))
+            syllables = []
+            offset = 0
+            for index, (word, pos) in enumerate(words):
+                phones = list(readings[word]) if word in readings else contextual[offset:offset + len(word)]
+                offset += len(word)
+                previous, previous_pos = words[index - 1] if index else ("", "")
+                following, following_pos = words[index + 1] if index + 1 < len(words) else ("", "")
+                if word == "地" and pos == "uv":
+                    phones[0] = "de5"
+                elif index in modal_de:
+                    phones[0] = "dei3"
+                elif word == "得" and pos == "ud":
+                    complement = following_pos in {"a", "ad"}
+                    if following in {"很", "太", "再", "非常", "更", "不", "比较"} and index + 2 < len(words):
+                        complement = words[index + 2][1] in {"a", "ad"}
+                    if previous_pos.startswith("v") and complement:
+                        phones[0] = "de5"
+                elif word == "长" and previous in {"耗时", "更"}:
+                    phones[0] = "chang2"
+                if index + 1 in modal_de and phones[-1].endswith("3"):
+                    phones[-1] = phones[-1][:-1] + "2"
+                syllables.extend(phones)
+            # Choose contextual readings before native merging of 不/一/three-tone groups.
             rendered = []
-            for word in jieba.lcut(span, cut_all=False):
-                phones = lazy_pinyin(word, style=Style.TONE3, neutral_tone_with_five=True)
-                if len(word) == 2 and word[0] != word[1]:
-                    phones = self._sandhi._three_sandhi(word, phones)
+            offset = 0
+            for word, pos in self._sandhi.pre_merge_for_modify(words):
+                phones = list(readings[word]) if word in readings else syllables[offset:offset + len(word)]
+                offset += len(word)
+                phones = self._sandhi._bu_sandhi(word, phones)
+                phones = self._sandhi._yi_sandhi(word, phones)
+                phones = self._sandhi._three_sandhi(word, phones)
                 rendered.append("".join(ZHG2P.py2ipa(phone) for phone in phones))
             parts.append(" ".join(rendered))
         return "".join(parts).replace(chr(815), "")
@@ -1072,7 +1179,7 @@ class Frontend:
                          else self._thai._ipa.get(token) or fallback_g2p(token))
         ipa = " ".join(parts)
         phones = re.sub(r"/[^/]+/", lambda match: ipa_to_kokoro(match[0]).replace(".", ""), ipa)
-        return phones.translate(str.maketrans({"→": "", "↑": "→"}))
+        return phones if self._native_symbols else phones.translate(str.maketrans({"→": "", "↑": "→"}))
 
     def _native(self, text, language):
         if language == "en":
@@ -1086,7 +1193,8 @@ class Frontend:
             text = text.replace("¿", "").replace("¡", "")
         if language == "th":
             return self._thai_phones(text)
-        return self._espeak[language](text)[0].translate(str.maketrans(_SYMBOL_MAP.get(language, {})))
+        phones = self._espeak[language](text)[0]
+        return phones if self._native_symbols else phones.translate(str.maketrans(_SYMBOL_MAP.get(language, {})))
 
     def _literal_spans(self, text):
         spans = protected_spans(text)
@@ -1119,6 +1227,21 @@ class Frontend:
             language = self.detect_language(text)
         if language not in LANGUAGES:
             raise ValueError(f"Unsupported Kokoro Multi language: {language}")
+        flattened = re.sub(r"[\r\n]", " ", text)
+        protected_lines = (protected_spans(flattened)
+                           + [m.span() for m in self._terms.finditer(flattened)]
+                           + [m.span() for m in _unit_pattern(language).finditer(flattened)]
+                           + [m.span() for m in _FORMULA_LIKE.finditer(flattened)])
+        text = re.sub(r"[\r\n]", lambda m: " " if any(a <= m.start() < b for a, b in protected_lines)
+                      else m[0], text)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) > 1:
+            parts = [lines[0]]
+            for left, right in zip(lines, lines[1:]):
+                stopped = any(m.end() == len(left) for m in _STOPS.finditer(left))
+                continuation = re.search(r"[=+−*/^×÷-]$", left) or re.match(r"[=+−*/^×÷-]", right)
+                parts.extend((" " if stopped or continuation else ", ", right))
+            text = "".join(parts)
         with self._lock:
             spoken, _ = normalize_notation(text, language)
             protected = self._literal_spans(spoken)
