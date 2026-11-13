@@ -694,9 +694,32 @@ ENV PYTHONUNBUFFERED=1
 # exactly the "garbage characters" that make `docker logs` unreadable.
 ENV RCUTILS_COLORIZED_OUTPUT=0
 
+# 01yuewen fork-only feature profile: private JP61 frontend; original main/config stay intact.
+# Reuse the image's pip to bootstrap only this venv. --without-pip avoids
+# Debian ensurepip and an extra apt transaction/ldconfig trigger in this layer.
+RUN if [ "${JP_VERSION}" = "61" ]; then \
+      python3 -B -c 'import venv, pip' && \
+      python3 -m venv --without-pip --system-site-packages /opt/xiaoyou-v6 && \
+      /opt/xiaoyou-v6/bin/python3 -B -c \
+        'import sys, sysconfig; assert sys.prefix == "/opt/xiaoyou-v6" and sys.prefix != sys.base_prefix; assert sysconfig.get_path("purelib").startswith(sys.prefix + "/")' && \
+      /opt/xiaoyou-v6/bin/python3 -m pip --isolated --disable-pip-version-check install \
+        --no-cache-dir --ignore-installed -i "${PYPI_MIRROR}" pip==26.3 && \
+      /opt/xiaoyou-v6/bin/python3 -B -c \
+        'import pip, sys; assert pip.__version__ == "26.3"; assert pip.__file__.startswith(sys.prefix + "/")' && \
+      /opt/xiaoyou-v6/bin/python3 -m pip --isolated --disable-pip-version-check install \
+        --no-cache-dir --ignore-installed -i "${PYPI_MIRROR}" \
+        -r /work/plugins/xiaoyou_v6/requirements.gpu.jp6.txt && \
+      printf '61\n' > /opt/xiaoyou-v6/jetpack-version; \
+    fi
+ENV XIAOYOU01_BUILT_FOR_JP=${JP_VERSION}
+
 CMD ["/bin/bash", "-c", \
     "export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 && \
      source /opt/ros/humble/install/setup.bash && \
      source /ros_ws/install/setup.bash && \
      source /etc/dla-fallback.env && \
-     python3 /work/main.py"]
+     if [ \"${XIAOYOU01_BUILT_FOR_JP}\" = \"61\" ] && [ \"${XIAOYOU01_TTS_ENABLE:-1}\" != \"0\" ]; then \
+       exec python3 -B /work/plugins/xiaoyou_v6/entrypoint_gpu.py; \
+     else \
+       python3 /work/main.py; \
+     fi"]

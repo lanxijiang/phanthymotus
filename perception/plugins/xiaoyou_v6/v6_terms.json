@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "project_version": "xiaoyou_v6",
+  "scope": "Only exact complete native spaCy MToken text CUDA, cuda, Cuda, or SageAIOS before Misaki subtokenize; never substring or global-character replacement",
+  "phoneme_alphabet": "Kokoro-82M v1.0 / Misaki 0.9.4 US English",
+  "terms": {
+    "CUDA": "kˈudə",
+    "cuda": "kˈudə",
+    "Cuda": "kˈudə",
+    "SageAIOS": "sˈAʤ ˈA ˈI ˈO ˈɛs"
+  },
+  "sources": [
+    {
+      "url": "https://forums.developer.nvidia.com/t/cuda-2-1-faq-please-read-before-posting/6898",
+      "evidence": "NVIDIA CUDA FAQ: pronunciation koo-duh"
+    },
+    {
+      "url": "https://github.com/hexgrad/misaki/blob/main/misaki/en.py",
+      "evidence": "Misaki native G2P.tokenize -> MToken.phonemes -> retokenize skip for explicitly phonemized tokens; verified installed 0.9.4"
+    },
+    {
+      "kind": "user_requested_reading",
+      "token": "SageAIOS",
+      "reading": "Sage as an English word, then four separate English letter names A I O S",
+      "candidate_status": "Exact route checked on CPU and actual isolated GPU audition generated; user listening approval pending",
+      "legacy_rules_imported_or_copied": false
+    }
+  ],
+  "legacy_rules_imported_or_copied": false,
+  "implementation": "Instance-local subclass of misaki.en.G2P.tokenize; set MToken.phonemes and MToken._.rating only if phonemes is None; no lexicon changes"
+}
