@@ -1,0 +1,569 @@
+{
+  "schema_version": 3,
+  "project_version": "xiaoyou_v6",
+  "scope": "Exact complete native spaCy tokens only; original CUDA/SageAIOS readings plus explicit product/business case aliases; canonical spellings keep native contextual G2P.",
+  "phoneme_alphabet": "Kokoro-82M v1.0 / Misaki 0.9.4 US English",
+  "terms": {
+    "CUDA": "kˈudə",
+    "cuda": "kˈudə",
+    "Cuda": "kˈudə",
+    "SageAIOS": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+    "Ipad": "ˈIpˌæd",
+    "IPAD": "ˈIpˌæd",
+    "ipad": "ˈIpˌæd",
+    "iphone": "ˈIfˌOn",
+    "IPHONE": "ˈIfˌOn",
+    "Iphone": "ˈIfˌOn",
+    "macbook": "mˌækbˈʊk",
+    "MACBOOK": "mˌækbˈʊk",
+    "Macbook": "mˌækbˈʊk",
+    "PHANCY": "fˈænsi",
+    "phancy": "fˈænsi",
+    "phancygroup": "fˈænsi ɡɹˈup",
+    "Phancygroup": "fˈænsi ɡɹˈup",
+    "PHANCYGROUP": "fˈænsi ɡɹˈup",
+    "phanthy": "fˈænθi",
+    "PHANTHY": "fˈænθi",
+    "MODELHUB": "mˈɑdᵊlhˌʌb",
+    "Modelhub": "mˈɑdᵊlhˌʌb",
+    "modelhub": "mˈɑdᵊlhˌʌb",
+    "MODELHUBXC": "mˈɑdᵊlhˌʌbˌɛkssˈi",
+    "Modelhubxc": "mˈɑdᵊlhˌʌbˌɛkssˈi",
+    "modelhubxc": "mˈɑdᵊlhˌʌbˌɛkssˈi",
+    "PHANCLAW": "fˈæn klˈɔ",
+    "Phanclaw": "fˈæn klˈɔ",
+    "phanclaw": "fˈæn klˈɔ",
+    "phanthycloud": "fˈænθi klˈWd",
+    "PHANTHYCLOUD": "fˈænθi klˈWd",
+    "Phanthycloud": "fˈænθi klˈWd",
+    "Phancycloud": "fˈænsi klˈWd",
+    "phancycloud": "fˈænsi klˈWd",
+    "PHANCYCLOUD": "fˈænsi klˈWd",
+    "hypercircle": "hˌIpəɹsˈɜɹkᵊl",
+    "Hypercircle": "hˌIpəɹsˈɜɹkᵊl",
+    "HYPERCIRCLE": "hˌIpəɹsˈɜɹkᵊl",
+    "hami": "hˈɑmi",
+    "HAMI": "hˈɑmi",
+    "Hami": "hˈɑmi",
+    "Sageaios": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+    "sageaios": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+    "SAGEAIOS": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+    "tensorrt": "tˈɛnsəɹɑɹtˌi",
+    "Tensorrt": "tˈɛnsəɹɑɹtˌi",
+    "TENSORRT": "tˈɛnsəɹɑɹtˌi",
+    "Pytorch": "pˈI tˈɔɹʧ",
+    "PYTORCH": "pˈI tˈɔɹʧ",
+    "pytorch": "pˈI tˈɔɹʧ",
+    "Nvidia": "ɛnvˈɪdiə",
+    "nvidia": "ɛnvˈɪdiə",
+    "modelsphere": "mˈɑdᵊlsfˌɪɹ",
+    "MODELSPHERE": "mˈɑdᵊlsfˌɪɹ",
+    "Modelsphere": "mˈɑdᵊlsfˌɪɹ",
+    "autotune": "ˈɔTOtˌun",
+    "AUTOTUNE": "ˈɔTOtˌun",
+    "Autotune": "ˈɔTOtˌun",
+    "LLMBENCH": "ˌɛlˌɛlˈɛm bˈɛnʧ",
+    "Llmbench": "ˌɛlˌɛlˈɛm bˈɛnʧ",
+    "llmbench": "ˌɛlˌɛlˈɛm bˈɛnʧ",
+    "SAGEONE": "sˈAʤwˌʌn",
+    "Sageone": "sˈAʤwˌʌn",
+    "sageone": "sˈAʤwˌʌn",
+    "Sagegpt": "sˌAʤʤˌipˌitˈi",
+    "SAGEGPT": "sˌAʤʤˌipˌitˈi",
+    "sagegpt": "sˌAʤʤˌipˌitˈi",
+    "hypercycle": "hˌIpəɹsˈIkəl",
+    "Hypercycle": "hˌIpəɹsˈIkəl",
+    "HYPERCYCLE": "hˌIpəɹsˈIkəl",
+    "phanthycode": "fˈænθi kˈOd",
+    "PHANTHYCODE": "fˈænθi kˈOd",
+    "Phanthycode": "fˈænθi kˈOd",
+    "phanthywork": "fˈænθi wˈɜɹk",
+    "PHANTHYWORK": "fˈænθi wˈɜɹk",
+    "Phanthywork": "fˈænθi wˈɜɹk"
+  },
+  "sources": [
+    {
+      "url": "https://forums.developer.nvidia.com/t/cuda-2-1-faq-please-read-before-posting/6898",
+      "evidence": "NVIDIA CUDA FAQ: pronunciation koo-duh"
+    },
+    {
+      "url": "https://github.com/hexgrad/misaki/blob/main/misaki/en.py",
+      "evidence": "Misaki native G2P.tokenize -> MToken.phonemes -> retokenize skip for explicitly phonemized tokens; verified installed 0.9.4"
+    },
+    {
+      "kind": "user_requested_reading",
+      "token": "SageAIOS",
+      "reading": "Sage as an English word, then four separate English letter names A I O S",
+      "candidate_status": "Exact route checked on CPU and actual isolated GPU audition generated; user listening approval pending",
+      "legacy_rules_imported_or_copied": false
+    },
+    {
+      "kind": "V4_text_coverage_reference_only",
+      "path": "/mnt/disk0/home/work/lanxijiang/tts/ttsv4/resources/当前中英文词库修复/external_lexicon.json",
+      "sha256": "4eaab63b79d4adaa598702ec462119c68e735565249c7aa722adef02c1740285",
+      "VITS_phonemes_or_rules_imported": false,
+      "excluded_unconfirmed_names": [
+        "PhanRouter",
+        "PhanthyMotus",
+        "Motus",
+        "EngineX",
+        "InfiniVRAM",
+        "iOS"
+      ]
+    }
+  ],
+  "legacy_rules_imported_or_copied": false,
+  "implementation": "Instance-local subclass of misaki.en.G2P.tokenize; set MToken.phonemes and MToken._.rating only if phonemes is None; no lexicon changes",
+  "case_aliases": {
+    "Ipad": {
+      "canonical": "iPad",
+      "phonemes": "ˈIpˌæd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "IPAD": {
+      "canonical": "iPad",
+      "phonemes": "ˈIpˌæd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "ipad": {
+      "canonical": "iPad",
+      "phonemes": "ˈIpˌæd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "iphone": {
+      "canonical": "iPhone",
+      "phonemes": "ˈIfˌOn",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "IPHONE": {
+      "canonical": "iPhone",
+      "phonemes": "ˈIfˌOn",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Iphone": {
+      "canonical": "iPhone",
+      "phonemes": "ˈIfˌOn",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "macbook": {
+      "canonical": "MacBook",
+      "phonemes": "mˌækbˈʊk",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "MACBOOK": {
+      "canonical": "MacBook",
+      "phonemes": "mˌækbˈʊk",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Macbook": {
+      "canonical": "MacBook",
+      "phonemes": "mˌækbˈʊk",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANCY": {
+      "canonical": "Phancy",
+      "phonemes": "fˈænsi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phancy": {
+      "canonical": "Phancy",
+      "phonemes": "fˈænsi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phancygroup": {
+      "canonical": "PhancyGroup",
+      "phonemes": "fˈænsi ɡɹˈup",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Phancygroup": {
+      "canonical": "PhancyGroup",
+      "phonemes": "fˈænsi ɡɹˈup",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANCYGROUP": {
+      "canonical": "PhancyGroup",
+      "phonemes": "fˈænsi ɡɹˈup",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phanthy": {
+      "canonical": "Phanthy",
+      "phonemes": "fˈænθi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANTHY": {
+      "canonical": "Phanthy",
+      "phonemes": "fˈænθi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "MODELHUB": {
+      "canonical": "ModelHub",
+      "phonemes": "mˈɑdᵊlhˌʌb",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Modelhub": {
+      "canonical": "ModelHub",
+      "phonemes": "mˈɑdᵊlhˌʌb",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "modelhub": {
+      "canonical": "ModelHub",
+      "phonemes": "mˈɑdᵊlhˌʌb",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "MODELHUBXC": {
+      "canonical": "ModelHubXC",
+      "phonemes": "mˈɑdᵊlhˌʌbˌɛkssˈi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Modelhubxc": {
+      "canonical": "ModelHubXC",
+      "phonemes": "mˈɑdᵊlhˌʌbˌɛkssˈi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "modelhubxc": {
+      "canonical": "ModelHubXC",
+      "phonemes": "mˈɑdᵊlhˌʌbˌɛkssˈi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANCLAW": {
+      "canonical": "PhanClaw",
+      "phonemes": "fˈæn klˈɔ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Phanclaw": {
+      "canonical": "PhanClaw",
+      "phonemes": "fˈæn klˈɔ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phanclaw": {
+      "canonical": "PhanClaw",
+      "phonemes": "fˈæn klˈɔ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phanthycloud": {
+      "canonical": "PhanthyCloud",
+      "phonemes": "fˈænθi klˈWd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANTHYCLOUD": {
+      "canonical": "PhanthyCloud",
+      "phonemes": "fˈænθi klˈWd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Phanthycloud": {
+      "canonical": "PhanthyCloud",
+      "phonemes": "fˈænθi klˈWd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Phancycloud": {
+      "canonical": "PhancyCloud",
+      "phonemes": "fˈænsi klˈWd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phancycloud": {
+      "canonical": "PhancyCloud",
+      "phonemes": "fˈænsi klˈWd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANCYCLOUD": {
+      "canonical": "PhancyCloud",
+      "phonemes": "fˈænsi klˈWd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "hypercircle": {
+      "canonical": "HyperCircle",
+      "phonemes": "hˌIpəɹsˈɜɹkᵊl",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Hypercircle": {
+      "canonical": "HyperCircle",
+      "phonemes": "hˌIpəɹsˈɜɹkᵊl",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "HYPERCIRCLE": {
+      "canonical": "HyperCircle",
+      "phonemes": "hˌIpəɹsˈɜɹkᵊl",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "hami": {
+      "canonical": "HAMi",
+      "phonemes": "hˈɑmi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "HAMI": {
+      "canonical": "HAMi",
+      "phonemes": "hˈɑmi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Hami": {
+      "canonical": "HAMi",
+      "phonemes": "hˈɑmi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Sageaios": {
+      "canonical": "SageAIOS",
+      "phonemes": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "sageaios": {
+      "canonical": "SageAIOS",
+      "phonemes": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "SAGEAIOS": {
+      "canonical": "SageAIOS",
+      "phonemes": "sˈAʤ ˈA ˈI ˈO ˈɛs",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "tensorrt": {
+      "canonical": "TensorRT",
+      "phonemes": "tˈɛnsəɹɑɹtˌi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Tensorrt": {
+      "canonical": "TensorRT",
+      "phonemes": "tˈɛnsəɹɑɹtˌi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "TENSORRT": {
+      "canonical": "TensorRT",
+      "phonemes": "tˈɛnsəɹɑɹtˌi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Pytorch": {
+      "canonical": "PyTorch",
+      "phonemes": "pˈI tˈɔɹʧ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PYTORCH": {
+      "canonical": "PyTorch",
+      "phonemes": "pˈI tˈɔɹʧ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "pytorch": {
+      "canonical": "PyTorch",
+      "phonemes": "pˈI tˈɔɹʧ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Nvidia": {
+      "canonical": "NVIDIA",
+      "phonemes": "ɛnvˈɪdiə",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "nvidia": {
+      "canonical": "NVIDIA",
+      "phonemes": "ɛnvˈɪdiə",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "modelsphere": {
+      "canonical": "ModelSphere",
+      "phonemes": "mˈɑdᵊlsfˌɪɹ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "MODELSPHERE": {
+      "canonical": "ModelSphere",
+      "phonemes": "mˈɑdᵊlsfˌɪɹ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Modelsphere": {
+      "canonical": "ModelSphere",
+      "phonemes": "mˈɑdᵊlsfˌɪɹ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "autotune": {
+      "canonical": "AutoTune",
+      "phonemes": "ˈɔTOtˌun",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "AUTOTUNE": {
+      "canonical": "AutoTune",
+      "phonemes": "ˈɔTOtˌun",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Autotune": {
+      "canonical": "AutoTune",
+      "phonemes": "ˈɔTOtˌun",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "LLMBENCH": {
+      "canonical": "LLMBench",
+      "phonemes": "ˌɛlˌɛlˈɛm bˈɛnʧ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Llmbench": {
+      "canonical": "LLMBench",
+      "phonemes": "ˌɛlˌɛlˈɛm bˈɛnʧ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "llmbench": {
+      "canonical": "LLMBench",
+      "phonemes": "ˌɛlˌɛlˈɛm bˈɛnʧ",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "SAGEONE": {
+      "canonical": "SageOne",
+      "phonemes": "sˈAʤwˌʌn",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Sageone": {
+      "canonical": "SageOne",
+      "phonemes": "sˈAʤwˌʌn",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "sageone": {
+      "canonical": "SageOne",
+      "phonemes": "sˈAʤwˌʌn",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Sagegpt": {
+      "canonical": "SageGPT",
+      "phonemes": "sˌAʤʤˌipˌitˈi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "SAGEGPT": {
+      "canonical": "SageGPT",
+      "phonemes": "sˌAʤʤˌipˌitˈi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "sagegpt": {
+      "canonical": "SageGPT",
+      "phonemes": "sˌAʤʤˌipˌitˈi",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "hypercycle": {
+      "canonical": "HyperCycle",
+      "phonemes": "hˌIpəɹsˈIkəl",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Hypercycle": {
+      "canonical": "HyperCycle",
+      "phonemes": "hˌIpəɹsˈIkəl",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "HYPERCYCLE": {
+      "canonical": "HyperCycle",
+      "phonemes": "hˌIpəɹsˈIkəl",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phanthycode": {
+      "canonical": "PhanthyCode",
+      "phonemes": "fˈænθi kˈOd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANTHYCODE": {
+      "canonical": "PhanthyCode",
+      "phonemes": "fˈænθi kˈOd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Phanthycode": {
+      "canonical": "PhanthyCode",
+      "phonemes": "fˈænθi kˈOd",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "phanthywork": {
+      "canonical": "PhanthyWork",
+      "phonemes": "fˈænθi wˈɜɹk",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "PHANTHYWORK": {
+      "canonical": "PhanthyWork",
+      "phonemes": "fˈænθi wˈɜɹk",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    },
+    "Phanthywork": {
+      "canonical": "PhanthyWork",
+      "phonemes": "fˈænθi wˈɜɹk",
+      "source": "current_xiaoyou_Misaki_canonical_spelling",
+      "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+    }
+  },
+  "unapplied_compound_aliases": {
+    "reason": "Native spaCy splits XC-LLM into three tokens; no tokenizer merge or whole-phrase override introduced",
+    "aliases": {
+      "xc-llm": {
+        "canonical": "XC-LLM",
+        "phonemes": "ɛkssˌiˌɛlˌɛlˈɛm",
+        "source": "current_xiaoyou_Misaki_canonical_spelling",
+        "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+      },
+      "Xc-Llm": {
+        "canonical": "XC-LLM",
+        "phonemes": "ɛkssˌiˌɛlˌɛlˈɛm",
+        "source": "current_xiaoyou_Misaki_canonical_spelling",
+        "pronunciation_quality_review": "native_reference_not_new_acoustic_acceptance"
+      }
+    }
+  },
+  "case_policy": "ASCII casefold only for approved canonical words, with source-span identifier boundary guards; canonical exact spelling keeps native G2P."
+}

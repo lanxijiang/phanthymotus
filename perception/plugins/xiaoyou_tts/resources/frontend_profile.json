@@ -1,0 +1,29 @@
+{
+  "kind": "private_xiaoyou_general_readings_candidate_20261115",
+  "source_student_profile_sha256": "4c8e1a4a9e0c57162528b0a3edc0964468a9ecc053bf405957e11fc4ef576549",
+  "source_files": {
+    "frontend/phonemizer.py": {
+      "profile_sha256": "57ce333178b3215cbd259e6b3aa83f4e97149a0208b21052057e1f24c287455e"
+    },
+    "frontend/normalization.py": {
+      "profile_sha256": "c9fe5cce9d45507ba084af47cefe86739e1d4f2d5a3eeb4745870d2db14cb5a5"
+    },
+    "frontend/math.py": {
+      "profile_sha256": "35535c52a0a6edb49fce6a272c82f6772fc2e5fd6452c5dbb8166be3c7f6e726"
+    },
+    "frontend/pronunciation.py": {
+      "profile_sha256": "98f00a03fd66302c7f5f3cbdc6aba2a54fc76b63efb1aefa7b88f17c26497a4a"
+    },
+    "frontend/http_status.py": {
+      "profile_sha256": "1e73e9b3e628c66021cf626679717eae35ffcb9cff1e626657c3dd7cd7af1842"
+    },
+    "resources/terms.json": {
+      "profile_sha256": "be5f147a74286a2d74752c809c2f26564c9c27ef2ee78bf2f2c8c9db97d027b7"
+    },
+    "frontend/__init__.py": {
+      "profile_sha256": "994c535e0e75b35f9c711ae8093a4764134d4128975a5a2b4e2b8262bae699ec"
+    }
+  },
+  "developer_or_training_path_required": false,
+  "parent_profile_sha256": "bd65f675d2f3b383cbbe25ac9e6c48aa196c3dcc77de0ba1b48f75b3eb7c81fa"
+}

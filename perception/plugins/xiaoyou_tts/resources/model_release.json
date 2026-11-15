@@ -1,0 +1,53 @@
+{
+  "code_layout": "xiaoyou_tts/frontend-runtime-resources",
+  "english_model": {
+    "bytes": 12806118,
+    "file": "frontend/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "runtime_network_download": false,
+    "sha256": "1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"
+  },
+  "environment_mapping": {
+    "asset_bytes": "XIAOYOU_V6_ASSET_BYTES",
+    "asset_sha256": "XIAOYOU_V6_ASSET_SHA256",
+    "model_dir": "XIAOYOU_V6_MODEL_DIR",
+    "modelscope_file": "XIAOYOU_V6_MODELSCOPE_FILE",
+    "modelscope_repo": "XIAOYOU_V6_MODELSCOPE_REPO",
+    "modelscope_revision": "XIAOYOU_V6_MODELSCOPE_REVISION",
+    "runtime_manifest_sha256": "XIAOYOU_V6_RUNTIME_MANIFEST_SHA256"
+  },
+  "global_step": 26523,
+  "model_dir": "/models/01yuewen",
+  "model_id": "xiaoyou01",
+  "previous_release": {
+    "asset_bytes": 317341780,
+    "asset_sha256": "04626f35f0163786190945e63fea6a922053bfeee1af6bf056b8e63b77fb69fe",
+    "modelscope_file": "01yuewen-jp6-fp32-three-plan-26523-20261113-v1.tar.gz",
+    "modelscope_repo": "lanxijiang/xiaoyou01",
+    "modelscope_revision": "69859d406b270628528ac2ade6697d7f1a40c902",
+    "runtime_manifest_sha256": "e99e76eac13eb44c81f1b54700b4915211366d8cc8720b924dc75f6d6e32b379"
+  },
+  "project_version": "xiaoyou_v6",
+  "publication_note": "General frontend dictionary, per-session auto language and bounded DDS transport reuse. Resource integrity verified; no Darvin score or all-TTFT acceptance claimed.",
+  "published": true,
+  "release_acceptance": {
+    "CPU_tests_passed": true,
+    "MCP_tested": true,
+    "backend_tested": true,
+    "darvin_passed": false,
+    "ttft_lt1": false,
+    "three_physical_instances_verified": false
+  },
+  "runtime_manifest_sha256": "ef1422e64290253a64fe65d51b8258136b4c14d23ef2469bf588181725838159",
+  "schema_version": 1,
+  "source_checkpoint_sha256": "a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0",
+  "status": "published_resource_for_Darvin_evaluation_pending",
+  "voice_id": "01yuewen",
+  "diagnostic_only": true,
+  "quality_review_pending": true,
+  "note": "Private runnable diagnostic only. New FP32 fused encoder/acoustic checked against original GPU plans on four complete real inputs; unchanged OPT1024 vocoder retains its prior same-input native-decoder component evidence. New end-to-end old-wave gate FAILED; this report grants no publication, quality or latency acceptance.",
+  "modelscope_repo": "lanxijiang/xiaoyou01",
+  "modelscope_revision": "2c08d7fad7573136927601619595a97b55341085",
+  "modelscope_file": "01yuewen-jp6-fp32-three-plan-26523-20261115-v1.tar.gz",
+  "asset_bytes": 326855110,
+  "asset_sha256": "d0f805a2d83d13c64ff95824054f230a5f75a27242ae3e4967c1fc182a19fbf5"
+}
