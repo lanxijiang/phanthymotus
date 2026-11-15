@@ -316,3 +316,158 @@ def first_complete_sentence_spans(full):
         if full[:end].strip() and full[end:].strip(): return [(0,end),(end,len(full))]
         return [(0,len(full))]
     return [(0,len(full))]
+
+
+# First-clause planning: original complete-sentence fallback remains unchanged.
+# Conservative initial thresholds; quality and latency require separate evidence.
+_FC_KEEP_SENTENCE_UNITS = 24
+_FC_MIN_FIRST_CLAUSE_UNITS = 12
+_FC_ASCII_TOKEN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*|[0-9]+(?:[.,][0-9]+)*")
+_FC_MONTH = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?'
+_FC_WEEKDAY = r'(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\.?'
+_FC_DAY = r'(?:[0-9]{1,2}(?:st|nd|rd|th)?|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[ -](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[ -]first)'
+_FC_WEEKDAY_END = re.compile(r'\b' + _FC_WEEKDAY + r'\s*$', re.I)
+_FC_DATE_NEXT = re.compile(r'\s*(?:' + _FC_MONTH + r'\b|[0-9]{1,2}\s+' + _FC_MONTH + r'\b)', re.I)
+_FC_MONTH_DAY_END = re.compile(r'\b' + _FC_MONTH + r'\s+' + _FC_DAY + r'\s*$', re.I)
+_FC_MONTH_END = re.compile(r'\b' + _FC_MONTH + r'\s*$', re.I)
+_FC_YEAR_NEXT = re.compile(r'\s*(?:[0-9]{4}\b|(?:nineteen|twenty|two\s+thousand)\b)', re.I)
+_FC_CJK_NUMBER = r'[0-9零〇○一二两三四五六七八九十百千]+'
+_FC_CJK_DATE_COMMAS = (
+    (re.compile(_FC_CJK_NUMBER + r'年\s*$'), re.compile(r'\s*' + _FC_CJK_NUMBER + r'月')),
+    (re.compile(_FC_CJK_NUMBER + r'月\s*$'), re.compile(r'\s*' + _FC_CJK_NUMBER + r'(?:日|号)')),
+    (re.compile(_FC_CJK_NUMBER + r'(?:日|号)\s*$'),
+     re.compile(r'\s*(?:(?:凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|夜间)|' + _FC_CJK_NUMBER + r'(?:点|时)|[0-9]{1,2}:[0-9]{2})')),
+)
+_FC_MATH_OPERATOR = r'(?:==|!=|>=|<=|=|≠|≥|≤|等于|大于|小于)'
+_FC_ASSIGNMENT_END = re.compile(r'[A-Za-z][A-Za-z0-9_]*\s*' + _FC_MATH_OPERATOR + r'[^,，;；。]*$')
+_FC_ASSIGNMENT_NEXT = re.compile(r'\s*[A-Za-z][A-Za-z0-9_]*\s*' + _FC_MATH_OPERATOR)
+_FC_COMPANY_SUFFIX = re.compile(r'\s*(?:Inc|Ltd|Corp|Co|LLC|LLP)\.?\b', re.I)
+_FC_IDENTIFIER_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:@?=+#%&~\\,-')
+_FC_OPEN = {'(': ')', '[': ']', '{': '}', '（': '）', '【': '】', '《': '》', '〈': '〉'}
+_FC_QUOTES = {'"': '"', "'": "'", '“': '”', '‘': '’', '「': '」', '『': '』'}
+_FC_CLOSE = set(_FC_OPEN.values())
+_FC_QUOTE_CLOSE = set(_FC_QUOTES.values()) - {'"', "'"}
+
+
+def _fc_spoken_units(text):
+    """Count Han ideographs + twice ASCII words/numeric tokens; punctuation=0."""
+    cjk = sum(0x3400 <= ord(c) <= 0x4DBF or 0x4E00 <= ord(c) <= 0x9FFF
+              or 0xF900 <= ord(c) <= 0xFAFF or 0x20000 <= ord(c) <= 0x323AF
+              for c in text)
+    return cjk + 2 * len(_FC_ASCII_TOKEN.findall(text))
+
+
+def _fc_escaped(text, index):
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == '\\':
+        backslashes += 1
+        index -= 1
+    return bool(backslashes % 2)
+
+
+def _fc_apostrophe(text, index):
+    before, after = text[index - 1:index], text[index + 1:index + 2]
+    # Contractions and English possessives are not opening quotation marks.
+    return bool(before and before.isascii() and before.isalnum()
+                and (not after or after.isspace() or after in ',，.;:!?' or after.isascii() and after.isalnum()))
+
+
+def _fc_top_level_commas(text):
+    """Return eligible lexical positions, or None for malformed nesting/quotes."""
+    stack = []
+    commas = []
+    for index, char in enumerate(text):
+        if stack and stack[-1][1]:
+            if char == stack[-1][0] and not _fc_escaped(text, index):
+                stack.pop()
+            continue
+        if char in _FC_QUOTES:
+            if char in "'‘’" and _fc_apostrophe(text, index):
+                continue
+            stack.append((_FC_QUOTES[char], True))
+        elif char in _FC_QUOTE_CLOSE:
+            if char == '’' and _fc_apostrophe(text, index):
+                continue
+            return None
+        elif char in _FC_OPEN:
+            stack.append((_FC_OPEN[char], False))
+        elif char in _FC_CLOSE:
+            if not stack or stack[-1][0] != char:
+                return None
+            stack.pop()
+        elif char in ',，' and not stack:
+            commas.append(index)
+    return None if stack else commas
+
+
+def _fc_unsafe_comma(full, index):
+    before, after = full[:index], full[index + 1:]
+    left, right = before.rstrip(), after.lstrip()
+    if not left or not right:
+        return True
+    # A comma between numeric components is not a semantic clause boundary.
+    if left[-1].isascii() and left[-1].isdigit() and right[0].isascii() and right[0].isdigit():
+        return True
+    if _FC_WEEKDAY_END.search(before) and _FC_DATE_NEXT.match(after):
+        return True
+    if (_FC_MONTH_DAY_END.search(before) or _FC_MONTH_END.search(before)) and _FC_YEAR_NEXT.match(after):
+        return True
+    if any(left_pattern.search(before) and right_pattern.match(after) for left_pattern, right_pattern in _FC_CJK_DATE_COMMAS):
+        return True
+    if _FC_ASSIGNMENT_END.search(before) and _FC_ASSIGNMENT_NEXT.match(after):
+        return True
+    if _FC_COMPANY_SUFFIX.match(after):
+        return True
+    word = re.search(r'([A-Za-z][A-Za-z.]*)\s*$', before)
+    if word:
+        token = word.group(1).lower()
+        abbreviations = {str(x).lower().rstrip('.') for x in _ABBREVIATIONS}
+        abbreviations.update(str(x).lower().rstrip('.') for x in _FIRST_SENTENCE_ABBREVIATIONS)
+        if token.rstrip('.') in abbreviations or re.fullmatch(r'(?:[a-z]\.)+', token):
+            return True
+    # Protect embedded comma in a contiguous filename, URL or identifier. A
+    # punctuation comma after a complete identifier is not inside that atom.
+    start, stop = index, index + 1
+    while start and full[start - 1] in _FC_IDENTIFIER_CHARS:
+        start -= 1
+    while stop < len(full) and full[stop] in _FC_IDENTIFIER_CHARS:
+        stop += 1
+    if start < index and stop > index + 1:
+        token = full[start:stop]
+        if any(char in token for char in '._/:@?=+#%&~\\'):
+            return True
+    return not safe_boundary(full, index) or not safe_boundary(full, index + 1)
+
+
+def first_clause_spans(full):
+    """Plan at most one safe first-comma cut; otherwise preserve baseline spans.
+
+    This neither normalizes nor pronounces text. Callers must retain their
+    original whole-text frontend context; the plan provides source offsets only.
+    """
+    if not isinstance(full, str):
+        raise TypeError('full must be a string')
+    original = first_complete_sentence_spans(full)
+    if not original:
+        raise ValueError('Baseline returned no sentence span')
+    if any(not isinstance(span, (tuple, list)) or len(span) != 2 for span in original):
+        raise ValueError('Invalid baseline sentence spans')
+    if original[0][0] != 0 or original[-1][1] != len(full) or any(
+            left[1] != right[0] for left, right in zip(original, original[1:])):
+        raise ValueError('Baseline sentence spans do not preserve full text')
+    first_end = original[0][1]
+    first = full[:first_end]
+    if _fc_spoken_units(first) <= _FC_KEEP_SENTENCE_UNITS:
+        return original
+    commas = _fc_top_level_commas(first)
+    if commas is None:
+        return original
+    for index in commas:
+        end = index + 1
+        if _fc_spoken_units(full[:end]) < _FC_MIN_FIRST_CLAUSE_UNITS:
+            continue
+        if not _fc_spoken_units(full[end:first_end]) or _fc_unsafe_comma(full, index):
+            continue
+        return [(0, end), (end, len(full))]
+    return original

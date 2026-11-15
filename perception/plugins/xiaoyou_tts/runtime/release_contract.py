@@ -9,7 +9,7 @@ SOURCE_SHA = 'a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0'
 
 FRONTEND_SHA = '57ce333178b3215cbd259e6b3aa83f4e97149a0208b21052057e1f24c287455e'
 
-NORMALIZATION_REVISION = '01yuewen-session-language-DDS-reuse-20261115-private'
+NORMALIZATION_REVISION = '01yuewen-safe-comma-first-clause-20261116'
 
 NORMALIZATION_MODULE_SHAS = {'frontend/__init__.py': '994c535e0e75b35f9c711ae8093a4764134d4128975a5a2b4e2b8262bae699ec',
  'frontend/http_status.py': '1e73e9b3e628c66021cf626679717eae35ffcb9cff1e626657c3dd7cd7af1842',
@@ -17,7 +17,7 @@ NORMALIZATION_MODULE_SHAS = {'frontend/__init__.py': '994c535e0e75b35f9c711ae809
  'frontend/normalization.py': 'c9fe5cce9d45507ba084af47cefe86739e1d4f2d5a3eeb4745870d2db14cb5a5',
  'frontend/numbers.py': 'ddd46ade4351d5852d7792e7b0a41248265f292f0392de52a237b48259632137',
  'frontend/pronunciation.py': '98f00a03fd66302c7f5f3cbdc6aba2a54fc76b63efb1aefa7b88f17c26497a4a',
- 'frontend/segmentation.py': '452265f1841dc8f6702883d95ea11be2524a995f9b0ef138fbf79eb79e7ad03c',
+ 'frontend/segmentation.py': '75ef923d5c98fae4f94ac66207656d37a410d2a0225d08c9ce961dc18e5a98a4',
  'resources/frontend_profile.json': '09e7af5580972e671ec8740b12d11adb0f4daf1f27e88f697e9fb218bf8ac7ca'}
 
 TERMS_SHA = 'be5f147a74286a2d74752c809c2f26564c9c27ef2ee78bf2f2c8c9db97d027b7'
@@ -68,8 +68,8 @@ STREAM_POLICY = {'activation_allocation': {'default': 'fixed',
                            'shape_mode': 'per_stage_lease_after_input_shape_validation',
                            'supported': ['fixed', 'shape']},
  'allow_frame_truncation': False,
- 'allowed_first_output_policies': ['sentence'],
- 'default_first_output_policy': 'sentence',
+ 'allowed_first_output_policies': ['clause', 'sentence'],
+ 'default_first_output_policy': 'clause',
  'join_padding': {'kind': 'PCM16_exact_zero_only',
                   'max_leading_samples': 2000,
                   'max_trailing_samples': 2000,
@@ -86,8 +86,15 @@ STREAM_POLICY = {'activation_allocation': {'default': 'fixed',
  'preserve_full_text': True,
  'proactive_span_limit': 2,
  'speed': 1.0,
- 'split_strategy': 'original_first_complete_sentence_then_full_tail_with_lossless_semantic_fallback',
- 'supported_F_range': [6, 1460]}
+ 'split_strategy': 'safe_first_comma_clause_then_full_tail_with_lossless_semantic_fallback',
+ 'supported_F_range': [6, 1460],
+ 'first_clause_selection': {'keep_complete_sentence_spoken_units_max': 24,
+                            'minimum_prefix_spoken_units': 12,
+                            'spoken_units': 'CJK ideographs plus twice ASCII word/number token '
+                                            'count',
+                            'punctuation': 'first safe comma inside the first complete sentence; '
+                                           'retain original punctuation',
+                            'short_or_ambiguous_fallback': 'complete_sentence'}}
 
 CHAIN_EVIDENCE_SHA = '539feb59614ab9ad10a46fb4d582282ee0359a87b231679aa957917125952048'
 

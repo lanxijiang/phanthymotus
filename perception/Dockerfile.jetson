@@ -713,7 +713,7 @@ RUN if [ "${JP_VERSION}" = "61" ]; then \
     fi
 ENV XIAOYOU01_BUILT_FOR_JP=${JP_VERSION}
 # Preserve sentence context; the unmeasured GPU noise cache remains opt-in.
-ENV XIAOYOU01_FIRST_OUTPUT_POLICY=sentence \
+ENV XIAOYOU01_FIRST_OUTPUT_POLICY=clause \
     XIAOYOU01_EXCITATION_CACHE=1 \
     XIAOYOU01_GPU_NOISE_CACHE=0 \
     XIAOYOU01_PCM_PREFIX=1 \

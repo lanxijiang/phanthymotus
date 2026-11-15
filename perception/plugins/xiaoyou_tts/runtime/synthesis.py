@@ -1,7 +1,7 @@
 """Independent V6 TensorRT FP32 backend. No CPU neural fallback.
 
-Emit a complete first sentence, then its intact tail, retaining full frontend
-context. Only excess zero PCM at their real sentence join is shortened. Actual
+Emit a safe first comma clause, then its intact tail, retaining full frontend
+context. Short/ambiguous openings retain the complete-sentence policy. Only excess zero PCM at their real sentence join is shortened. Actual
 token/frame overflow keeps the original lossless semantic fallback.
 Named numerical checks do not imply exhaustive shape or latency acceptance.
 """
@@ -193,9 +193,9 @@ class TRTBackend:
 
     def __init__(self, model_dir=None, *, cpu_threads=2, backend='tensorrt_fp32', expected_manifest_sha256=None):
         self.timing_enabled = os.environ.get('XIAOYOU01_TTS_TIMING') == '1'
-        self.first_output_policy = os.environ.get('XIAOYOU01_FIRST_OUTPUT_POLICY', 'sentence')
-        if self.first_output_policy != 'sentence':
-            raise ValueError('Only the original sentence output policy is supported')
+        self.first_output_policy = os.environ.get('XIAOYOU01_FIRST_OUTPUT_POLICY', STREAM_POLICY['default_first_output_policy'])
+        if self.first_output_policy not in STREAM_POLICY['allowed_first_output_policies']:
+            raise ValueError('First output policy must be clause or sentence')
         prefix_mode = os.environ.get('XIAOYOU01_PCM_PREFIX', '1')
         if prefix_mode not in ('0', '1'):
             raise ValueError('PCM prefix setting must be 0 or 1')
@@ -325,7 +325,7 @@ class TRTBackend:
             'frontend_dictionary_initialized': True,
             'frontend_dictionary_initialization_seconds': self.frontend_dictionary_initialization_seconds,
             'frontend_dictionary_initialization_scope': 'service startup before GPU allocation; dictionary only, no text/audio calls',
-            'streaming': 'complete first sentence then intact tail; join-only excess zero PCM shortened; bounded prefetch and lossless profile fallback',
+            'streaming': 'safe first comma clause or configured complete sentence, then intact tail; join-only excess zero PCM shortened; bounded prefetch and lossless profile fallback',
             'first_output_policy': self.first_output_policy,
             'excitation_cache_enabled': self.excitation_cache is not None,
             'excitation_cache_bytes': self.excitation_cache.persistent_array_bytes if self.excitation_cache is not None else 0,
@@ -505,13 +505,13 @@ class TRTBackend:
                     value.release()
 
     def _audio_clauses(self,text,language,cancel,*,normalization_language=None,_request_metrics=None,auto_fallback=None):
-        from ..frontend.segmentation import first_complete_sentence_spans
-        policy = getattr(self, 'first_output_policy', 'sentence')
-        if policy != 'sentence':
-            raise ValueError('Only the original sentence output policy is supported')
-        spans = first_complete_sentence_spans(text)
+        from ..frontend.segmentation import first_clause_spans, first_complete_sentence_spans
+        policy = getattr(self, 'first_output_policy', STREAM_POLICY['default_first_output_policy'])
+        if policy not in STREAM_POLICY['allowed_first_output_policies']:
+            raise ValueError('First output policy must be clause or sentence')
+        spans = first_clause_spans(text) if policy == 'clause' else first_complete_sentence_spans(text)
         if not 1 <= len(spans) <= 2 or ''.join(text[a:b] for a,b in spans) != text:
-            raise ValueError('Complete-sentence policy changed normalized text')
+            raise ValueError('First-output policy changed normalized text')
         join = spans[0][1] if len(spans) == 2 else None
         if _request_metrics is None:
             _request_metrics = {}

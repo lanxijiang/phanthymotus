@@ -1,5 +1,8 @@
 {
+  "asset_bytes": 320591434,
+  "asset_sha256": "1f37e3537e875a8266ed3c7ae95e48f33788b6b36db5ae64d24edd7fc4371c05",
   "code_layout": "xiaoyou_tts/frontend-runtime-resources",
+  "diagnostic_only": true,
   "english_model": {
     "bytes": 12806118,
     "file": "frontend/en_core_web_sm-3.8.0-py3-none-any.whl",
@@ -18,36 +21,35 @@
   "global_step": 26523,
   "model_dir": "/models/01yuewen",
   "model_id": "xiaoyou01",
+  "modelscope_file": "01yuewen-jp6-fp32-clause-26523-20261116-v1.tar.gz",
+  "modelscope_repo": "lanxijiang/xiaoyou01",
+  "modelscope_revision": "8d5831b5be988430f11b6d5812a1adf3fc303f06",
+  "note": "Selected clause policy CPU/native A/B evidence is separate from historical original-wave numeric gates; strict historical failures remain false.",
   "previous_release": {
-    "asset_bytes": 317341780,
-    "asset_sha256": "04626f35f0163786190945e63fea6a922053bfeee1af6bf056b8e63b77fb69fe",
-    "modelscope_file": "01yuewen-jp6-fp32-three-plan-26523-20261113-v1.tar.gz",
+    "asset_bytes": 326855110,
+    "asset_sha256": "d0f805a2d83d13c64ff95824054f230a5f75a27242ae3e4967c1fc182a19fbf5",
+    "modelscope_file": "01yuewen-jp6-fp32-three-plan-26523-20261115-v1.tar.gz",
     "modelscope_repo": "lanxijiang/xiaoyou01",
-    "modelscope_revision": "69859d406b270628528ac2ade6697d7f1a40c902",
-    "runtime_manifest_sha256": "e99e76eac13eb44c81f1b54700b4915211366d8cc8720b924dc75f6d6e32b379"
+    "modelscope_revision": "2c08d7fad7573136927601619595a97b55341085",
+    "runtime_manifest_sha256": "ef1422e64290253a64fe65d51b8258136b4c14d23ef2469bf588181725838159"
   },
   "project_version": "xiaoyou_v6",
-  "publication_note": "General frontend dictionary, per-session auto language and bounded DDS transport reuse. Resource integrity verified; no Darvin score or all-TTFT acceptance claimed.",
+  "publication_note": "User-requested safe comma-first block with intact tail; same26523 FP32 weights/style/plans/speed1. New policy JP6 and Darvin acceptance unmeasured.",
   "published": true,
+  "quality_review_pending": true,
   "release_acceptance": {
     "CPU_tests_passed": true,
-    "MCP_tested": true,
-    "backend_tested": true,
+    "MCP_tested": false,
+    "backend_tested": false,
     "darvin_passed": false,
+    "native_A_B_generated": true,
+    "three_physical_instances_verified": false,
     "ttft_lt1": false,
-    "three_physical_instances_verified": false
+    "user_prefers_natural_punctuation": true
   },
-  "runtime_manifest_sha256": "ef1422e64290253a64fe65d51b8258136b4c14d23ef2469bf588181725838159",
+  "runtime_manifest_sha256": "0039a58bb09407f3a843102d29680c4c8ec226c297c9ebfcbd21223fd1c8134c",
   "schema_version": 1,
   "source_checkpoint_sha256": "a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0",
-  "status": "published_resource_for_Darvin_evaluation_pending",
-  "voice_id": "01yuewen",
-  "diagnostic_only": true,
-  "quality_review_pending": true,
-  "note": "Private runnable diagnostic only. New FP32 fused encoder/acoustic checked against original GPU plans on four complete real inputs; unchanged OPT1024 vocoder retains its prior same-input native-decoder component evidence. New end-to-end old-wave gate FAILED; this report grants no publication, quality or latency acceptance.",
-  "modelscope_repo": "lanxijiang/xiaoyou01",
-  "modelscope_revision": "2c08d7fad7573136927601619595a97b55341085",
-  "modelscope_file": "01yuewen-jp6-fp32-three-plan-26523-20261115-v1.tar.gz",
-  "asset_bytes": 326855110,
-  "asset_sha256": "d0f805a2d83d13c64ff95824054f230a5f75a27242ae3e4967c1fc182a19fbf5"
+  "status": "published_comma_first_clause_evaluation_candidate_JP6_pending",
+  "voice_id": "01yuewen"
 }
