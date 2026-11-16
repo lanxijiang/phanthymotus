@@ -1,8 +1,8 @@
 """CPU-only long-text segmentation candidate derived from pinned V6 runtime.
 
 No normalization, pronunciation, waveform, speed or model changes. Call safe_split
-only after the existing verified profile rejects a clause. A Chinese enumeration
-comma (、) is a fallback boundary and is never an active natural-clause delimiter.
+only after the existing verified profile rejects a clause. The first-output plan
+also admits safe colons and enumeration boundaries after two complete items.
 Concatenation preserves source strings including punctuation and whitespace.
 """
 import re
@@ -373,7 +373,7 @@ def _fc_apostrophe(text, index):
                 and (not after or after.isspace() or after in ',，.;:!?' or after.isascii() and after.isalnum()))
 
 
-def _fc_top_level_commas(text):
+def _fc_top_level_commas(text, delimiters=',，'):
     """Return eligible lexical positions, or None for malformed nesting/quotes."""
     stack = []
     commas = []
@@ -396,7 +396,7 @@ def _fc_top_level_commas(text):
             if not stack or stack[-1][0] != char:
                 return None
             stack.pop()
-        elif char in ',，' and not stack:
+        elif char in delimiters and not stack:
             commas.append(index)
     return None if stack else commas
 
@@ -440,8 +440,30 @@ def _fc_unsafe_comma(full, index):
     return not safe_boundary(full, index) or not safe_boundary(full, index + 1)
 
 
+def _fc_extra_boundary_safe(full, index, earlier):
+    """Guard list items and colon atoms without changing comma decisions."""
+    mark = full[index]
+    if mark == '、':
+        # The immediately preceding top-level delimiter must be another list
+        # separator, with two complete nonempty items before this candidate.
+        if not earlier or full[earlier[-1]] != '、':
+            return False
+        previous = earlier[-1]
+        start = earlier[-2] + 1 if len(earlier) > 1 else 0
+        return bool(_fc_spoken_units(full[start:previous])
+                    and _fc_spoken_units(full[previous + 1:index]))
+    if mark in ':：':
+        left, right = full[:index].rstrip(), full[index + 1:].lstrip()
+        # Ratios and type/function mappings with spaces remain one atom too.
+        if re.search(r'(?<![A-Za-z0-9_])[A-Za-z]$', left) and re.match(r'[A-Za-z](?![A-Za-z0-9_])', right):
+            return False
+        if left and right and left[-1] in '零〇○一二两三四五六七八九十百千' and right[0] in '零〇○一二两三四五六七八九十百千':
+            return False
+    return True
+
+
 def first_clause_spans(full):
-    """Plan at most one safe first-comma cut; otherwise preserve baseline spans.
+    """Plan one safe punctuation cut; otherwise preserve baseline spans.
 
     This neither normalizes nor pronounces text. Callers must retain their
     original whole-text frontend context; the plan provides source offsets only.
@@ -460,10 +482,12 @@ def first_clause_spans(full):
     first = full[:first_end]
     if _fc_spoken_units(first) <= _FC_KEEP_SENTENCE_UNITS:
         return original
-    commas = _fc_top_level_commas(first)
+    commas = _fc_top_level_commas(first, ',，:：、')
     if commas is None:
         return original
-    for index in commas:
+    for position, index in enumerate(commas):
+        if not _fc_extra_boundary_safe(full, index, commas[:position]):
+            continue
         end = index + 1
         if _fc_spoken_units(full[:end]) < _FC_MIN_FIRST_CLAUSE_UNITS:
             continue

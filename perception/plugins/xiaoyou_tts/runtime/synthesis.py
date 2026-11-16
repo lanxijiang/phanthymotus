@@ -1,6 +1,6 @@
 """Independent V6 TensorRT FP32 backend. No CPU neural fallback.
 
-Emit a safe first comma clause, then its intact tail, retaining full frontend
+Emit a safe first punctuation clause, then its intact tail, retaining full frontend
 context. Short/ambiguous openings retain the complete-sentence policy. Only excess zero PCM at their real sentence join is shortened. Actual
 token/frame overflow keeps the original lossless semantic fallback.
 Named numerical checks do not imply exhaustive shape or latency acceptance.
@@ -325,7 +325,7 @@ class TRTBackend:
             'frontend_dictionary_initialized': True,
             'frontend_dictionary_initialization_seconds': self.frontend_dictionary_initialization_seconds,
             'frontend_dictionary_initialization_scope': 'service startup before GPU allocation; dictionary only, no text/audio calls',
-            'streaming': 'safe first comma clause or configured complete sentence, then intact tail; join-only excess zero PCM shortened; bounded prefetch and lossless profile fallback',
+            'streaming': 'safe first punctuation clause or configured complete sentence, then intact tail; join-only excess zero PCM shortened; bounded prefetch and lossless profile fallback',
             'first_output_policy': self.first_output_policy,
             'excitation_cache_enabled': self.excitation_cache is not None,
             'excitation_cache_bytes': self.excitation_cache.persistent_array_bytes if self.excitation_cache is not None else 0,
