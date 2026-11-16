@@ -48,6 +48,21 @@ def _timing_records(request):
                 'record_kind': 'summary', 'metrics': metrics,
                 'attempt_count': len(attempts),
                 'attempts_sha256': hashlib.sha256(encode(attempts).encode()).hexdigest()}]
+    # Preserve existing summaries byte-for-byte whenever they already fit.
+    # Expanded private workspace diagnostics can otherwise overflow the public
+    # log frame; bind their complete dictionary in one separate bounded record.
+    summary_payload = json.dumps(records[0], ensure_ascii=False, allow_nan=False,
+                                 separators=(',', ':'))
+    if len(summary_payload.encode()) > limit and 'gpu_allocations' in metrics:
+        allocations = metrics.pop('gpu_allocations')
+        if not isinstance(allocations, dict):
+            raise ValueError('GPU allocation timing must be a complete dictionary')
+        metrics['gpu_allocations_sha256'] = hashlib.sha256(encode(allocations).encode()).hexdigest()
+        records.append({'event': 'xiaoyou_request_allocation_timing', 'schema': _TIMING_LOG_SCHEMA,
+                        'record_kind': 'allocation', 'trace_id': trace.get('trace_id'),
+                        'action_id': trace.get('action_id'),
+                        'session_request_index': trace.get('session_request_index'),
+                        'gpu_allocations': allocations})
     for index, attempt in enumerate(attempts):
         if not isinstance(attempt, dict) or attempt.get('index') != index:
             raise ValueError('Timing attempt indices must be contiguous and ordered')

@@ -1,4 +1,5 @@
 """Xiaoyou adapter for the public tts tool and ordered ROS audio delivery."""
+import array
 import json
 import logging
 import threading
@@ -61,7 +62,7 @@ def _node(input_topic, backend, suffix, cfg):
             msg = AudioChunk()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.format = 'audio/pcm-16k'
-            msg.data = list(frame)
+            msg.data = array.array('B', frame)
             self._pub.publish(msg)
 
         def _ready(self, cancel):

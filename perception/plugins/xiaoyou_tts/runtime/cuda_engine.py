@@ -203,10 +203,21 @@ class GPUEnginePool:
     Caller serializes jobs. This object additionally locks all allocation/execution
     paths so inference contexts and the shared workspace cannot execute concurrently.
     """
-    def __init__(self, root, stages, *, expected_trt_prefix, max_explicit_bytes=1024 * 1024**2):
+    def __init__(self, root, stages, *, expected_trt_prefix, max_explicit_bytes=1024 * 1024**2,
+                 shape_workspace_cache_bytes=None):
         workspace_mode = os.environ.get('XIAOYOU01_WORKSPACE_MODE', 'fixed')
         if workspace_mode not in ('fixed', 'shape'):
             raise ValueError('V6 workspace mode must be fixed or shape')
+        if shape_workspace_cache_bytes is None:
+            configured_cap = os.environ.get('XIAOYOU01_SHAPE_WORKSPACE_CACHE_BYTES', '0')
+            if not configured_cap.isascii() or not configured_cap.isdecimal():
+                raise ValueError('V6 shape workspace cache environment cap must be decimal bytes')
+            shape_workspace_cache_bytes = int(configured_cap)
+        if (type(shape_workspace_cache_bytes) is not int or shape_workspace_cache_bytes < 0
+                or shape_workspace_cache_bytes > int(max_explicit_bytes)):
+            raise ValueError('V6 shape workspace cache cap must be an integer within the explicit allocation cap')
+        if shape_workspace_cache_bytes and workspace_mode != 'shape':
+            raise ValueError('V6 shape workspace cache requires explicit shape workspace mode')
         nvtx_mode = os.environ.get('XIAOYOU01_NVTX_VERBOSITY', 'original')
         if nvtx_mode not in ('original', 'none'):
             raise ValueError('V6 NVTX verbosity must be original or none')
@@ -234,6 +245,17 @@ class GPUEnginePool:
         self.workspace = None
         self.workspace_bytes = 0
         self.workspace_mode = workspace_mode
+        # Opt-in only. At most one idle allocation per validated stage is kept,
+        # with a strict total byte cap. These allocations remain in every budget.
+        self.max_workspace_cache_bytes = shape_workspace_cache_bytes
+        self._workspace_cache = {}
+        self._workspace_cached_bytes = 0
+        self._workspace_stage = None
+        self._workspace_requested_bytes = 0
+        self.workspace_allocation_count = 0
+        self.workspace_reuse_count = 0
+        self.workspace_cross_stage_reuse_count = 0
+        self.workspace_free_count = 0
         self.workspace_upper_bound_bytes = 0
         self.workspace_peak_bytes = 0
         self.workspace_by_stage = {}
@@ -288,7 +310,8 @@ class GPUEnginePool:
                 upper = int(upper)
                 self.workspace_upper_bound_bytes = max(self.workspace_upper_bound_bytes, upper)
                 self.workspace_by_stage[name] = {'engine_max_bytes': upper, 'query_count': 0,
-                    'lease_count': 0, 'last_requested_bytes': None, 'peak_requested_bytes': 0,
+                    'lease_count': 0, 'allocation_count': 0, 'reuse_count': 0, 'cross_stage_reuse_count': 0,
+                    'last_requested_bytes': None, 'peak_requested_bytes': 0,
                     'nvtx': {
                         'before': _nvtx_label(nvtx_before),
                         'after': _nvtx_label(nvtx_after),
@@ -302,6 +325,7 @@ class GPUEnginePool:
                     self.workspace = ctypes.c_void_p()
                     self.cuda.call('cudaMalloc', ctypes.byref(self.workspace), self.workspace_upper_bound_bytes)
                     self.workspace_bytes = self.workspace_upper_bound_bytes
+                    self.workspace_allocation_count += 1
                     for obj in self.engines.values():
                         obj.context.device_memory = self.workspace.value
                 self.workspace_peak_bytes = self.workspace_bytes
@@ -401,6 +425,57 @@ class GPUEnginePool:
         # Poison blocks new work, so this remains bounded to the failing call.
         self._quarantined_refs.append(references)
 
+    def _activation_allocated_bytes(self):
+        return self.workspace_bytes + self._workspace_cached_bytes
+
+    def _evict_workspace(self, stage):
+        block = self._workspace_cache.get(stage)
+        if block is None:
+            return
+        # A previous lease was retired only after a drain. A new infer may have
+        # queued H2D copies since then; explicitly drain before cudaFree anyway.
+        if not self._stream_drained:
+            self._synchronize()
+        try:
+            self.cuda.call('cudaFree', block['pointer'])
+        except BaseException:
+            self.poisoned = True
+            raise
+        self._workspace_cached_bytes -= block['bytes']
+        del self._workspace_cache[stage]
+        self.workspace_free_count += 1
+
+    def _free_workspace_cache(self):
+        for stage in list(self._workspace_cache):
+            self._evict_workspace(stage)
+
+    def _release_workspace(self, *, retain, _activation_timings=None):
+        """Retire an active lease after drain, or discard all on an error."""
+        if self.workspace is not None:
+            if not self._stream_drained:
+                self.poisoned = True
+                raise RuntimeError('V6 cannot retire activation memory before a confirmed stream drain')
+            if (retain and self.max_workspace_cache_bytes
+                    and self.workspace_bytes <= self.max_workspace_cache_bytes):
+                stage = self._workspace_stage
+                if stage is None or stage in self._workspace_cache:
+                    self.poisoned = True
+                    raise RuntimeError('V6 invalid shape workspace cache ownership')
+                # Insertion order is LRU: renting removes an entry and returning
+                # appends it. Never exceed the cap even momentarily while idle.
+                while self._workspace_cached_bytes + self.workspace_bytes > self.max_workspace_cache_bytes:
+                    self._evict_workspace(next(iter(self._workspace_cache)))
+                self._workspace_cache[stage] = {'pointer': self.workspace, 'bytes': self.workspace_bytes}
+                self._workspace_cached_bytes += self.workspace_bytes
+                self.workspace = None
+                self.workspace_bytes = 0
+                self._workspace_stage = None
+                self._workspace_requested_bytes = 0
+            else:
+                self._free_workspace(_activation_timings=_activation_timings)
+        if not retain:
+            self._free_workspace_cache()
+
     def _rent_workspace(self, stage, api, *, _activation_timings=None):
         if self.workspace is not None or self.workspace_bytes:
             raise RuntimeError('V6 shape workspace still has an outstanding lease')
@@ -422,36 +497,75 @@ class GPUEnginePool:
             raise RuntimeError('V6 actual shape workspace size is invalid or exceeds the engine bound')
         record['last_requested_bytes'] = required
         record['peak_requested_bytes'] = max(record['peak_requested_bytes'], required)
-        if self.io_bytes + required > self.max_explicit_bytes:
-            self._trim_cache()
-        if self.io_bytes + required > self.max_explicit_bytes:
-            raise RuntimeError('V6 explicit GPU allocation cap exceeded by shape workspace; no fallback')
-        pointer = ctypes.c_void_p()
-        try:
-            started = time.perf_counter() if _activation_timings is not None else None
+        block = self._workspace_cache.get(stage)
+        # Reuse prefers this stage, then best-fit idle memory from any stage. A
+        # temporary large shape cannot leave a large high-water block attached
+        # to all later small requests: a >2x size drop reallocates at actual size.
+        reuse = (block is not None and required <= block['bytes'] <= 2 * required)
+        if block is not None and not reuse:
+            self._evict_workspace(stage)
+        source_stage = stage
+        if not reuse:
+            compatible = [(name, cached) for name, cached in self._workspace_cache.items()
+                          if required <= cached['bytes'] <= 2 * required]
+            if compatible:
+                source_stage, block = min(compatible, key=lambda item: item[1]['bytes'])
+                reuse = True
+        if reuse:
+            # Each idle block was retired after a confirmed stream drain. Remove
+            # its old owner before leasing; return will label it for this stage.
+            del self._workspace_cache[source_stage]
+            self._workspace_cached_bytes -= block['bytes']
+            pointer, capacity = block['pointer'], block['bytes']
+            self.workspace_reuse_count += 1
+            record['reuse_count'] += 1
+            if source_stage != stage:
+                self.workspace_cross_stage_reuse_count += 1
+                record['cross_stage_reuse_count'] += 1
+            if _activation_timings is not None:
+                _activation_timings['malloc_wall_seconds'] = 0.0
+        else:
+            if self.io_bytes + self._activation_allocated_bytes() + required > self.max_explicit_bytes:
+                self._trim_cache()
+            while (self._workspace_cache
+                   and self.io_bytes + self._activation_allocated_bytes() + required > self.max_explicit_bytes):
+                self._evict_workspace(next(iter(self._workspace_cache)))
+            if self.io_bytes + self._activation_allocated_bytes() + required > self.max_explicit_bytes:
+                raise RuntimeError('V6 explicit GPU allocation cap exceeded by shape workspace; no fallback')
+            pointer, capacity = ctypes.c_void_p(), required
             try:
-                self.cuda.call('cudaMalloc', ctypes.byref(pointer), required)
-            finally:
-                if _activation_timings is not None:
-                    _activation_timings['malloc_wall_seconds'] = time.perf_counter() - started
-        except BaseException:
-            if pointer.value:
-                self.workspace, self.workspace_bytes = pointer, required
-                self.workspace_peak_bytes = max(self.workspace_peak_bytes, required)
-                self.peak_explicit_bytes = max(self.peak_explicit_bytes, required + self.io_bytes)
-                self.poisoned = True
-            raise
-        if not pointer.value:
-            raise RuntimeError('V6 shape workspace allocation returned a null pointer')
-        self.workspace, self.workspace_bytes = pointer, required
-        self.workspace_peak_bytes = max(self.workspace_peak_bytes, required)
-        self.peak_explicit_bytes = max(self.peak_explicit_bytes, self.workspace_bytes + self.io_bytes)
+                started = time.perf_counter() if _activation_timings is not None else None
+                try:
+                    self.cuda.call('cudaMalloc', ctypes.byref(pointer), required)
+                finally:
+                    if _activation_timings is not None:
+                        _activation_timings['malloc_wall_seconds'] = time.perf_counter() - started
+            except BaseException:
+                if pointer.value:
+                    self.workspace, self.workspace_bytes = pointer, capacity
+                    self._workspace_stage, self._workspace_requested_bytes = stage, required
+                    self.workspace_allocation_count += 1
+                    record['allocation_count'] += 1
+                    allocated = self._activation_allocated_bytes()
+                    self.workspace_peak_bytes = max(self.workspace_peak_bytes, allocated)
+                    self.peak_explicit_bytes = max(self.peak_explicit_bytes, allocated + self.io_bytes)
+                    self.poisoned = True
+                raise
+            if not pointer.value:
+                raise RuntimeError('V6 shape workspace allocation returned a null pointer')
+            self.workspace_allocation_count += 1
+            record['allocation_count'] += 1
+        self.workspace, self.workspace_bytes = pointer, capacity
+        self._workspace_stage, self._workspace_requested_bytes = stage, required
+        allocated = self._activation_allocated_bytes()
+        self.workspace_peak_bytes = max(self.workspace_peak_bytes, allocated)
+        self.peak_explicit_bytes = max(self.peak_explicit_bytes, allocated + self.io_bytes)
         record['lease_count'] += 1
         # TensorRT10.4's setter returns None on success. A context may retain
         # this address while idle; every shape-mode execute rebinds a fresh lease.
         started = time.perf_counter() if _activation_timings is not None else None
         try:
-            context.set_device_memory(pointer.value, required)
+            context.set_device_memory(pointer.value, capacity)
         finally:
             if _activation_timings is not None:
                 _activation_timings['bind_wall_seconds'] = time.perf_counter() - started
@@ -474,6 +588,9 @@ class GPUEnginePool:
             raise
         self.workspace = None
         self.workspace_bytes = 0
+        self._workspace_stage = None
+        self._workspace_requested_bytes = 0
+        self.workspace_free_count += 1
 
     def _allocate(self, shape, dtype):
         self._require_live()
@@ -486,16 +603,19 @@ class GPUEnginePool:
             self.cached_bytes -= block['bytes']
             block['in_use'] = True
         else:
-            if self.workspace_bytes + self.io_bytes + size > self.max_explicit_bytes:
+            while (self._workspace_cache
+                   and self._activation_allocated_bytes() + self.io_bytes + size > self.max_explicit_bytes):
+                self._evict_workspace(next(iter(self._workspace_cache)))
+            if self._activation_allocated_bytes() + self.io_bytes + size > self.max_explicit_bytes:
                 self._trim_cache()
-            if self.workspace_bytes + self.io_bytes + size > self.max_explicit_bytes:
+            if self._activation_allocated_bytes() + self.io_bytes + size > self.max_explicit_bytes:
                 raise RuntimeError('V6 explicit GPU allocation cap exceeded; no fallback')
             pointer = ctypes.c_void_p()
             self.cuda.call('cudaMalloc', ctypes.byref(pointer), size)
             block = {'pointer': pointer, 'bytes': size, 'in_use': True, 'freed': False}
             self.blocks[pointer.value] = block
             self.io_bytes += size
-        self.peak_explicit_bytes = max(self.peak_explicit_bytes, self.workspace_bytes + self.io_bytes)
+        self.peak_explicit_bytes = max(self.peak_explicit_bytes, self._activation_allocated_bytes() + self.io_bytes)
         return DeviceTensor(self, block, shape, dtype)
 
     def _trim_cache(self):
@@ -524,11 +644,12 @@ class GPUEnginePool:
         with self.lock:
             self._require_live()
             self.cuda.call('cudaSetDevice', 0)
-            a = np.ascontiguousarray(array)
-            if not np.isfinite(a).all():
-                raise ValueError('V6 upload contains nonfinite data')
-            out = self._allocate(a.shape, a.dtype)
+            a = out = None
             try:
+                a = np.ascontiguousarray(array)
+                if not np.isfinite(a).all():
+                    raise ValueError('V6 upload contains nonfinite data')
+                out = self._allocate(a.shape, a.dtype)
                 self._stream_drained = False
                 self.cuda.call('cudaMemcpyAsync', out.pointer, ctypes.c_void_p(a.ctypes.data), a.nbytes, 1, self.stream)
                 self._synchronize()
@@ -538,7 +659,9 @@ class GPUEnginePool:
                     self._synchronize()
                 finally:
                     if self._stream_drained:
-                        out.release()
+                        if out is not None:
+                            out.release()
+                        self._free_workspace_cache()
                     else:
                         self._retain_until_drain(a, out)
                 raise
@@ -563,6 +686,7 @@ class GPUEnginePool:
         with self.lock:
             self._require_live()
             if tensor.pool is not self:
+                self._free_workspace_cache()
                 raise RuntimeError('V6 device tensor belongs to a closed/different pool')
             self.cuda.call('cudaSetDevice', 0)
             result = np.empty(tensor.shape, dtype=tensor.dtype)
@@ -576,8 +700,11 @@ class GPUEnginePool:
                 finally:
                     if not self._stream_drained:
                         self._retain_until_drain(tensor, result)
+                    else:
+                        self._free_workspace_cache()
                 raise
             if not np.isfinite(result).all():
+                self._free_workspace_cache()
                 raise RuntimeError('V6 GPU output is nonfinite')
             return result
 
@@ -585,12 +712,13 @@ class GPUEnginePool:
         with self.lock:
             self._require_live()
             self.cuda.call('cudaSetDevice', 0)
-            spec, api = self.specs[stage], self.engines[stage]
-            if set(feed) != set(spec['inputs']) or set(expected_outputs) != set(spec['outputs']):
-                raise ValueError('V6 stage routing differs: ' + stage)
             inputs, temporary, outputs = {}, [], {}
             host_sources = []
+            completed = False
             try:
+                spec, api = self.specs[stage], self.engines[stage]
+                if set(feed) != set(spec['inputs']) or set(expected_outputs) != set(spec['outputs']):
+                    raise ValueError('V6 stage routing differs: ' + stage)
                 for name, value in feed.items():
                     if not isinstance(value, DeviceTensor):
                         if api.can_defer_upload_sync:
@@ -630,6 +758,7 @@ class GPUEnginePool:
                 if not api.addresses_and_execute(addresses, self.stream.value):
                     raise RuntimeError('V6 TensorRT execution failed: ' + stage)
                 self._synchronize()
+                completed = True
                 return outputs
             except BaseException:
                 try:
@@ -645,19 +774,31 @@ class GPUEnginePool:
                 if self._stream_drained:
                     try:
                         if self.workspace_mode == 'shape':
-                            self._free_workspace(_activation_timings=_activation_timings)
+                            self._release_workspace(retain=completed, _activation_timings=_activation_timings)
                     finally:
                         for value in temporary:
                             value.release()
 
     def stats(self):
         with self.lock:
-            return {'shared_activation_bytes': self.workspace_bytes, 'explicit_io_allocated_bytes': self.io_bytes,
+            allocated = self._activation_allocated_bytes()
+            return {'shared_activation_bytes': allocated, 'explicit_io_allocated_bytes': self.io_bytes,
                     'explicit_device_peak_bytes': self.peak_explicit_bytes,
                     'workspace_mode': self.workspace_mode,
                     'activation_upper_bound_bytes': self.workspace_upper_bound_bytes,
-                    'activation_current_bytes': self.workspace_bytes, 'activation_peak_bytes': self.workspace_peak_bytes,
-                    'activation_by_stage': {name: {**value, **({'nvtx': dict(value['nvtx'])} if 'nvtx' in value else {})}
+                    'activation_current_bytes': allocated, 'activation_peak_bytes': self.workspace_peak_bytes,
+                    'activation_allocated_bytes': allocated,
+                    'activation_leased_bytes': self.workspace_bytes,
+                    'activation_requested_bytes': self._workspace_requested_bytes,
+                    'activation_retained_bytes': self._workspace_cached_bytes,
+                    'activation_cache_cap_bytes': self.max_workspace_cache_bytes,
+                    'activation_allocation_count': self.workspace_allocation_count,
+                    'activation_reuse_count': self.workspace_reuse_count,
+                    'activation_cross_stage_reuse_count': self.workspace_cross_stage_reuse_count,
+                    'activation_free_count': self.workspace_free_count,
+                    'activation_by_stage': {name: {**value,
+                                            'retained_bytes': self._workspace_cache.get(name, {}).get('bytes', 0),
+                                            **({'nvtx': dict(value['nvtx'])} if 'nvtx' in value else {})}
                                             for name, value in self.workspace_by_stage.items()},
                     'poisoned': self.poisoned, 'stream_drained': self._stream_drained,
                     'closed': self.closed, 'closing': self.closing,
@@ -695,6 +836,7 @@ class GPUEnginePool:
                             self.cached_bytes -= block['bytes']
                 self.blocks.clear()
                 self._free_workspace()
+                self._free_workspace_cache()
                 self.runtime = None
                 gc.collect()
                 if self.stream.value:
