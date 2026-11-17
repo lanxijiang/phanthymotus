@@ -275,21 +275,46 @@ def _syntax_targets(text,words):
     return result
 
 class PolyphoneContextG2P:
-    def __init__(self,upstream):
+    def __init__(self,upstream,phrase_readings=None):
         if not callable(upstream) or getattr(upstream,'version',None)is not None or getattr(upstream,'frontend',None)is not None:
             raise TypeError('Only the audited legacy Misaki Chinese G2P ABI is supported')
         from misaki import zh
         self.upstream=upstream;self._native=zh;self.last_interventions=[]
         self._context=ContextVar('polyphone_context_'+str(id(self)),default=None)
+        if phrase_readings is None:phrase_readings={}
+        if not isinstance(phrase_readings,dict) or len(phrase_readings)>512:
+            raise ValueError('Chinese phrase readings require a bounded mapping')
+        self._phrase_trie={};self._phrase_count=len(phrase_readings)
+        for phrase,record in phrase_readings.items():
+            if (not isinstance(phrase,str) or not re.fullmatch(r'[\u4E00-\u9FFF]{2,32}',phrase)
+                    or not isinstance(record,dict) or set(record)!={'offset','pinyin'}
+                    or type(record['offset'])is not int or not 0<=record['offset']<len(phrase)
+                    or not isinstance(record['pinyin'],str) or not re.fullmatch(r'[a-z]+[1-5]',record['pinyin'])):
+                raise ValueError('Chinese phrase reading requires a complete Han phrase and one syllable offset')
+            # Validate the native pinyin-to-IPA alphabet before accepting data.
+            zh.ZHG2P.py2ipa(record['pinyin'])
+            node=self._phrase_trie
+            for character in phrase:node=node.setdefault(character,{})
+            node[None]={'phrase':phrase,**record}
         self.metadata={'kind':'isolated_polyphone_candidate_NOT_active_profile','source_path':str(Path(__file__).resolve()),'source_sha256':sha256(Path(__file__).read_bytes()).hexdigest(),'scope':['complete_native_word_华为_second_syllable_wei2','same_Chinese_span_以_1to48ChineseChars_为基础_target_wei2','verified_English_split_suffix_算力为基础_target_wei2','native_word_bounded_subject_得_action_dei3','native_word_bounded_verb_得_degree_quality_de5','native_word_bounded_manner_地_action_de5','numerical_value_copula_named_business_fields_wei2'],'bound_full_context_scope':'explicit_以…为基础_and_verified_grammar_phrases_and_numerical_value_copula_with_exact_offsets','global_dictionary_modified':False,'other_non_targets_delegate':True,'quality_accepted':False}
+
+        self.metadata.update(phrase_reading_count=self._phrase_count,
+            phrase_reading_scope='one reviewed syllable in complete consecutive native Han words; bound literal spans excluded; no global dictionaries',
+            phrase_lookup='constructor_compiled_trie')
 
     def __getattr__(self,name):return getattr(self.upstream,name)
 
     @contextmanager
-    def full_context(self,normalized):
+    def full_context(self,normalized,*,protected_spans=()):
         """Bind one already normalized article to this instance/task only."""
         if not isinstance(normalized,str) or not normalized:
             raise TypeError('A nonempty complete normalized string is required')
+        if not isinstance(protected_spans,(list,tuple)) or any(
+                not isinstance(item,(list,tuple)) or len(item)!=2
+                or any(type(value)is not int for value in item)
+                or not 0<=item[0]<item[1]<=len(normalized) for item in protected_spans):
+            raise ValueError('Protected Chinese source spans require exact normalized offsets')
+        words=self._words(normalized)
         targets=[]
         for match in _FULL_BASIS.finditer(normalized):
             if not re.search(r'[\u4E00-\u9FFFA-Za-z0-9]',match.group('object')):continue
@@ -298,7 +323,9 @@ class PolyphoneContextG2P:
             position=match.end()-3
             if normalized[position]!='为':raise RuntimeError('Full-context target offset mismatch')
             targets.append({'global_position':position,'context':match.group(),'rule':'bound_full_normalized_以…为基础','pinyin':'wei2'})
-        for item in _syntax_targets(normalized,self._words(normalized)):
+        for item in _syntax_targets(normalized,words):
+            targets.append({**item,'global_position':item['position']})
+        for item in self._phrase_targets(normalized,words,protected_spans):
             targets.append({**item,'global_position':item['position']})
         token=self._context.set({'text':normalized,'targets':targets})
         try:yield self
@@ -351,6 +378,31 @@ class PolyphoneContextG2P:
             cursor=segment.start()
             for word in tokens:words.append((word,cursor,cursor+len(word)));cursor+=len(word)
         return words
+
+    def _phrase_targets(self,text,words,protected_spans=()):
+        """Match only complete consecutive native words using the compiled trie."""
+        if not self._phrase_trie:return []
+        ends={end for _,_,end in words};targets={}
+        for _,start,_ in words:
+            node=self._phrase_trie;cursor=start
+            while cursor<len(text) and text[cursor]in node:
+                node=node[text[cursor]];cursor+=1
+                record=node.get(None)
+                if record is None or cursor not in ends:continue
+                if any(a<cursor and start<b for a,b in protected_spans):continue
+                # Han-bearing filenames/paths may lie outside the ASCII-only
+                # literal reader. Their separators still disqualify a name;
+                # a sentence-final period remains ordinary punctuation.
+                before=text[start-1:start]if start else'';after=text[cursor:cursor+1]
+                if before in ('_','/','\\','@','`') or after in ('_','/','\\','@','`'):continue
+                if after=='.' and re.match(r'[A-Za-z0-9_]',text[cursor+1:cursor+2]):continue
+                position=start+record['offset'];pinyin=record['pinyin']
+                if position in targets and targets[position]['pinyin']!=pinyin:
+                    raise RuntimeError('Conflicting complete-phrase Chinese readings')
+                targets[position]={'position':position,'character':text[position],'pinyin':pinyin,
+                    'context':record['phrase'],'rule':'reviewed_complete_native_phrase_syllable',
+                    'native_word_boundary_verified':True,'phrase_source_span':[start,cursor]}
+        return [targets[key]for key in sorted(targets)]
 
     def _targets(self,prepared,words):
         targets={}
@@ -405,10 +457,21 @@ class PolyphoneContextG2P:
         zh=self._native;prepared=zh.ZHG2P.map_punctuation(zh.cn2an.transform(text,'an2cn'))
         if expected_prepared is not None and prepared!=expected_prepared:raise RuntimeError('Per-span preparation changed after offset proof')
         words=self._words(prepared);by_position={item['position']:item for item in self._targets(prepared,words)}
+        # A bound article owns its verified phrase targets and literal guards.
+        # Without that proof, accept only ordinary Chinese prose; a Chinese gap
+        # inside a URL, code literal or mixed source must not acquire a rule.
+        if self._context.get()is None and re.fullmatch(r'[\u4E00-\u9FFF\s，。！？；：、（）“”‘’《》「」『』,.!?;:]+',text):
+            for item in self._phrase_targets(prepared,words):
+                position=item['position']
+                if position in by_position and by_position[position]['pinyin']!=item['pinyin']:
+                    raise RuntimeError('Phrase reading conflicts with an existing context rule')
+                by_position[position]=item
         for item in bound_targets:
             position=item['position']
             if prepared[position]!=item.get('character','为') or not any(start<=position<end for _,start,end in words):
                 raise RuntimeError('Bound target is not the exact native Chinese syllable')
+            if position in by_position and by_position[position]['pinyin']!=item['pinyin']:
+                raise RuntimeError('Bound phrase reading conflicts with an existing context rule')
             by_position[position]=item
         targets=[by_position[k]for k in sorted(by_position)];self.last_interventions=targets
         if not targets:return original

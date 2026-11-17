@@ -16,7 +16,7 @@ import hashlib,importlib,json,re,unicodedata
 
 PACKAGE_ROOT=Path(__file__).resolve().parents[1]
 RESOURCES=PACKAGE_ROOT/'resources'
-PROFILE_SHA='09e7af5580972e671ec8740b12d11adb0f4daf1f27e88f697e9fb218bf8ac7ca'
+PROFILE_SHA='1054e4793422d3f3ee2fbadf4876c0b46e8cff6e1e00ba5f45dc08f8ea0a63d0'
 class NumericNormalizationError(ValueError):pass
 def _sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 @lru_cache(maxsize=1)
@@ -87,8 +87,8 @@ for _alias,_canonical in _UNIT_ALIASES.items():
 _QUANT=r'(?:个|条|台|份|项|次|人|件|张|元|页|套|本|组|items?\b|records?\b|requests?\b|devices?\b|people\b|times?\b|rows?\b)'
 _QUANTITY=re.compile(_LEFT+r'(?P<n>'+_NUMBER+r')(?P<space>[ \t]*)(?P<q>'+_QUANT+r')',re.I)
 _STOCK_LABEL=r'(?:股票代码|证券代码|股票编号|港股代码|股票代号|股份代号|stock[ \t]+code|ticker[ \t]+code)'
-_STOCK=re.compile(r'(?P<label>'+_STOCK_LABEL+r'[ \t]*(?:(?:为|是|[:：#]|is|was)[ \t]*)?)(?P<code>[0-9]{1,6})(?P<market>\.(?:HK|SH|SZ))?(?![A-Za-z0-9_]|\.[0-9]|[/\\]|[ \t]*'+_QUANT+r')',re.I)
-_BARE_STOCK=re.compile(r'(?<![A-Za-z0-9_./])(?P<code>[0-9]{1,6})(?P<market>\.(?:HK|SH|SZ))(?![A-Za-z0-9_./])')
+_STOCK=re.compile(r'(?P<label>'+_STOCK_LABEL+r'[ \t]*(?:(?:为|是|[:：#]|is|was)[ \t]*)?)(?P<code>[0-9]{1,6})(?P<market>\.?(?:HK|SH|SZ))?(?![A-Za-z0-9_]|\.[0-9]|[/\\]|[ \t]*'+_QUANT+r')',re.I)
+_BARE_STOCK=re.compile(r'(?<![A-Za-z0-9_./\\])(?P<code>[0-9]{1,6})(?P<market>\.?(?:HK|SH|SZ))(?![A-Za-z0-9_./\\])',re.I)
 _CODE=re.compile(r'(?P<label>(?<![A-Za-z0-9_])(?:错误码|错误代码|返回码|响应码|状态码|error[ \t]+code|status[ \t]+code|response[ \t]+code)[ \t]*(?:(?:为|是|[:：#]|is|was)[ \t]*)?)(?P<code>[0-9]{1,16})(?![A-Za-z0-9_]|\.[0-9]|[/\\]|[ \t]*'+_QUANT+r')',re.I)
 _PORT=re.compile(r'(?P<label>(?:端口(?:号)?|(?<![A-Za-z0-9_])port(?:[ \t]+number)?\b)[ \t]*(?:(?:为|是|[:：#]|is|was)[ \t]*)?)(?P<code>[0-9]{1,5})(?![A-Za-z0-9_]|\.[0-9]|[/\\]|[ \t]*'+_QUANT+r')',re.I)
 _IDENTIFIER=re.compile(r'(?P<label>编号[ \t]*(?:(?:为|是|[:：#])[ \t]*)?)(?P<code>[0-9]{1,16})(?![A-Za-z0-9_]|\.[0-9]|[/\\]|[ \t]*'+_QUANT+r')')
@@ -307,8 +307,8 @@ def _normalize_clause(chunk,lang,general,math):
   if re.search(r'状态码|status[ \t]+code|响应码|response[ \t]+code',label,re.I)or re.search(r'\bHTTP\b',chunk,re.I):
    if not(re.fullmatch('[1-5][0-9]{2}',value)):return m.group()
   return label+(' 'if lang=='en'and label[-1:].isalnum()else'')+_number(general,value,lang,True)
- chunk=_STOCK.sub(lambda m:m['label']+(' 'if lang=='en'and m['label'][-1:].isalnum()else'')+_number(general,m['code'],lang,True)+(' '+m['market'][1:].upper()if m['market']else''),chunk)
- chunk=_BARE_STOCK.sub(lambda m:_number(general,m['code'],lang,True)+' '+m['market'][1:].upper(),chunk)
+ chunk=_STOCK.sub(lambda m:m['label']+(' 'if lang=='en'and m['label'][-1:].isalnum()else'')+_number(general,m['code'],lang,True)+(' '+m['market'].lstrip('.').upper()if m['market']else''),chunk)
+ chunk=_BARE_STOCK.sub(lambda m:_number(general,m['code'],lang,True)+' '+m['market'].lstrip('.').upper(),chunk)
  def port(m):
   if int(m['code'])>65535:raise NumericNormalizationError('Explicit port outside0..65535')
   return m['label']+(' 'if lang=='en'and m['label'][-1:].isalnum()else'')+_number(general,m['code'],lang,True)

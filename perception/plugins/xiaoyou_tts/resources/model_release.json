@@ -1,8 +1,13 @@
 {
-  "asset_bytes": 320592481,
-  "asset_sha256": "22ae532883c3ca30a7f36dc62b7a169a205523d8e2ee8d32b4d6ca392c9fce58",
+  "schema_version": 1,
+  "project_version": "xiaoyou_v6",
+  "model_id": "xiaoyou01",
+  "voice_id": "01yuewen",
+  "global_step": 26523,
+  "source_checkpoint_sha256": "a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0",
   "code_layout": "xiaoyou_tts/frontend-runtime-resources",
-  "diagnostic_only": true,
+  "model_dir": "/models/01yuewen",
+  "runtime_manifest_sha256": "d1874ef89fb40cbbcc1da5abfc96fc84c1f7bf7a392001b459b82e3a4caa5d51",
   "english_model": {
     "bytes": 12806118,
     "file": "frontend/en_core_web_sm-3.8.0-py3-none-any.whl",
@@ -18,47 +23,24 @@
     "modelscope_revision": "XIAOYOU_V6_MODELSCOPE_REVISION",
     "runtime_manifest_sha256": "XIAOYOU_V6_RUNTIME_MANIFEST_SHA256"
   },
-  "global_step": 26523,
-  "model_dir": "/models/01yuewen",
-  "model_id": "xiaoyou01",
-  "modelscope_file": "01yuewen-jp6-fp32-punctuation-26523-20261116-v2.tar.gz",
-  "modelscope_repo": "lanxijiang/xiaoyou01",
-  "modelscope_revision": "b81be8ccfe48b828f7015dd989c2708d3c393770",
-  "note": "Evaluation candidate with unchanged26523 FP32 weights/style/three plans and speed1; safe punctuation selector and shape workspace. Historical strict numeric failures remain false.",
-  "previous_release": {
-    "asset_bytes": 320591434,
-    "asset_sha256": "1f37e3537e875a8266ed3c7ae95e48f33788b6b36db5ae64d24edd7fc4371c05",
-    "modelscope_file": "01yuewen-jp6-fp32-clause-26523-20261116-v1.tar.gz",
-    "modelscope_repo": "lanxijiang/xiaoyou01",
-    "modelscope_revision": "8d5831b5be988430f11b6d5812a1adf3fc303f06",
-    "runtime_manifest_sha256": "0039a58bb09407f3a843102d29680c4c8ec226c297c9ebfcbd21223fd1c8134c"
-  },
-  "project_version": "xiaoyou_v6",
-  "publication_note": "Immutable resource anonymously downloaded and SHA-verified. Single physical JP6 process10 requests measured; no three-instance, Darvin, robot-player or subjective quality acceptance.",
+  "diagnostic_only": false,
   "published": true,
+  "private_local_only": false,
   "quality_review_pending": true,
+  "status": "published_Darvin_evaluation_candidate_three_instance_timing_pending",
+  "note": "Fixed public evaluation resource, anonymously SHA-verified. Single-instance JP6 transport/timing checked; new three-instance timing and Darvin acceptance remain unverified.",
   "release_acceptance": {
-    "CPU_tests_passed": true,
+    "frontend_accepted": false,
     "audio_quality_accepted": false,
-    "darvin_passed": false,
-    "native_A_B_generated": true,
-    "single_physical_JP6": {
-      "MCP_DDS_complete_requests": 10,
-      "assessment_sha256": "d144119e53bf32f5bb13d772bc6b6ad3e6c2fd4b08a8cfb5624c2eaa0a8ce127",
-      "max_first_PCM_seconds": 0.5880789700895548,
-      "paced4_same_text_complete_PCM_exact": true,
-      "paced_requests": 4,
-      "scope": "One process only; first PCM packet is not actual speaker onset or official Darvin metric acceptance.",
-      "unpaced_requests": 6,
-      "workspace_mode": "shape"
-    },
-    "three_physical_instances_verified": false,
+    "jetson_end_to_end_passed": false,
     "ttft_lt1": false,
-    "user_prefers_natural_punctuation": true
+    "rtf_lt1": false,
+    "three_physical_instances_verified": false,
+    "darvin_passed": false
   },
-  "runtime_manifest_sha256": "91b286ace86e74cd8cc9e3ef16d6750d8e9dc87a3a8d6aba9f4632da0cf6c35b",
-  "schema_version": 1,
-  "source_checkpoint_sha256": "a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0",
-  "status": "published_punctuation_shape_evaluation_candidate_single_JP6_verified_three_pending",
-  "voice_id": "01yuewen"
+  "modelscope_repo": "lanxijiang/xiaoyou01",
+  "modelscope_revision": "91280d58883f8959e57e0d60053d852c8a7f9e6c",
+  "modelscope_file": "01yuewen-jp6-fp32-lexicon-26523-20261117-v1.tar.gz",
+  "asset_bytes": 320593706,
+  "asset_sha256": "20774fb3cf69a043685517225772ed29f50e2ecc3cdda05b29fd321a4ccee6fe"
 }
