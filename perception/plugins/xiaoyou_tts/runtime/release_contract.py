@@ -9,18 +9,18 @@ SOURCE_SHA = 'a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0'
 
 FRONTEND_SHA = '10ae19f4636077cb1930efeadaebe80c794c304caef540e033dda9c07b6a8855'
 
-NORMALIZATION_REVISION = '01yuewen-business-lexicon-context-20261117-candidate'
+NORMALIZATION_REVISION = '01yuewen-contextual-polyphones-20261118-candidate'
 
 NORMALIZATION_MODULE_SHAS = {'frontend/__init__.py': '994c535e0e75b35f9c711ae8093a4764134d4128975a5a2b4e2b8262bae699ec',
  'frontend/http_status.py': '1e73e9b3e628c66021cf626679717eae35ffcb9cff1e626657c3dd7cd7af1842',
  'frontend/math.py': '35535c52a0a6edb49fce6a272c82f6772fc2e5fd6452c5dbb8166be3c7f6e726',
  'frontend/normalization.py': 'c9fe5cce9d45507ba084af47cefe86739e1d4f2d5a3eeb4745870d2db14cb5a5',
- 'frontend/numbers.py': 'caa123c50f4a536d166ec57eedd9b94727bef188520d7eaf901167106a537f0c',
- 'frontend/pronunciation.py': '40531547bca4e6c9e114e314aa63f1fb9dfbc4fc84beb9961eb7ca63868e4232',
+ 'frontend/numbers.py': '8be4193a16cb1764214b24718db3aa999d7ff74c680b252b6aa4c6b7f0f0dc7f',
+ 'frontend/pronunciation.py': '37f97358f67e9f7d57706640045a0a07b04e4399057953f46e5c2b4a8351ba23',
  'frontend/segmentation.py': 'd94d38877734783911b10063215e0e8a80ece7729031c0dc2ac3b0e85dcfbd8d',
- 'resources/frontend_profile.json': '1054e4793422d3f3ee2fbadf4876c0b46e8cff6e1e00ba5f45dc08f8ea0a63d0'}
+ 'resources/frontend_profile.json': '25e7b554f6e3ec07c64fe2c53b169c3e2ea5dc57a851312c66e0d66f9225879f'}
 
-TERMS_SHA = 'fe6d1726d0ada4c122a5c9656bed476a94356567ba2cf7aecfd79b97a533de79'
+TERMS_SHA = '424c489cabc9bfec347aa1f15b9b5886cbd4d227649efe789a06333c01e2981c'
 
 PHONE_ABI = 'kokoro-v1.0-misaki-0.9.4-xiaoyou-v6'
 

@@ -223,6 +223,16 @@ _VERIFIED_SPLIT_BASIS=re.compile(r'算力为基础')
 
 _FULL_BASIS=re.compile(r'以(?P<object>[\u4E00-\u9FFFA-Za-z0-9_ \t\-.]{1,64}?)为基础')
 
+_GROWTH_SUFFIX = re.compile(r'(?:见识|本事|个儿|个子|个头|得|高|胖|壮|大|出|成)')
+
+
+def _tower_is_object_of_hiding(text, start, end):
+    """Keep cáng in the narrow verb/object pattern “他想藏塔。”"""
+    following = text[end:end + 1]
+    if following and following not in '，。！？；,.!?;':
+        return False
+    return text[max(0, start - 2):start].endswith(('想', '打算', '试图'))
+
 _SYNTAX_RULES = (
     (re.compile(r'(?:我们|你们|他们|她们|咱们|大家|我|你|您|他|她)(?P<target>得)'
                 r'(?:先|把|去|赶紧|尽快|注意|确保)'),
@@ -231,9 +241,17 @@ _SYNTAX_RULES = (
                 r'(?:非常|十分|特别|比较|这么|那么|很|更|太)?'
                 r'(?:清楚|仔细|自然|流畅|准确)'),
      '得', 'de5', 'verb_得_optional_degree_quality'),
-    (re.compile(r'(?:安静|认真|仔细|耐心|温柔|轻轻)(?P<target>地)'
-                r'(?:解释|介绍|处理|核对|检查|听|说|讲|读|做|把)'),
+    (re.compile(r'(?:幸福快乐|有条不紊|实实在在|长时间|一点点|有目的|'
+                r'安静|认真|仔细|耐心|温柔|轻轻|慢慢|快乐|高兴|开心|'
+                r'静静|大声|小声|紧张|飞快|不停|更快|快速)(?P<target>地)'
+                r'(?:长大成人|长得更高|长大|成长|说道|说话|说着|笑着|找到|'
+                r'解释|介绍|处理|核对|检查|完成|学习|坐着|等待|准备|帮助|'
+                r'放下|跑回家|收集|改变|听|说|讲|读|做|把|走|笑|喊|跑)'),
      '地', 'de5', 'manner_地_action'),
+    (re.compile(r'(?:[零一二两三四五六七八九十百千万点]+)'
+                r'(?:毫米|厘米|分米|千米|公里|米)(?P<target>长)'
+                r'(?![高大出成])'),
+     '长', 'chang2', 'length_after_measurement'),
 )
 
 _CN_VALUE = r'(?:正负|正|负)?[零〇一二三四五六七八九十百千万亿兆两幺]+'
@@ -259,9 +277,14 @@ def _syntax_targets(text,words):
     result=[]
     starts={start for _,start,_ in words};ends={end for _,_,end in words}
     for pattern,character,pinyin,rule in _SYNTAX_RULES:
-        for match in pattern.finditer(text):
+        cursor = 0
+        while (match := pattern.search(text, cursor)) is not None:
             if match.start() not in starts or match.end() not in ends:
-                continue  # An embedded substring is not a proved grammar boundary.
+                # A shorter context can start at a native boundary inside an
+                # invalid longer match, as in “祝你幸福/快乐/地/长大成人”.
+                cursor = match.start() + 1 if character == '地' else match.end()
+                continue
+            cursor = match.end()
             tokens=[word for word,start,end in words if match.start()<=start and end<=match.end()]
             if ''.join(tokens)!=match.group():
                 raise RuntimeError('Grammar native tokens do not reconstruct exact context')
@@ -390,6 +413,11 @@ class PolyphoneContextG2P:
                 record=node.get(None)
                 if record is None or cursor not in ends:continue
                 if any(a<cursor and start<b for a,b in protected_spans):continue
+                phrase = record['phrase']
+                if phrase == '藏塔' and _tower_is_object_of_hiding(text, start, cursor):
+                    continue
+                if phrase in ('很长', '更长', '太长', '多长') and _GROWTH_SUFFIX.match(text, cursor):
+                    continue
                 # Han-bearing filenames/paths may lie outside the ASCII-only
                 # literal reader. Their separators still disqualify a name;
                 # a sentence-final period remains ordinary punctuation.

@@ -188090,6 +188090,114 @@
     "曾经理会在": {
       "offset": 0,
       "pinyin": "zeng1"
+    },
+    "藏族": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏文": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏语": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏塔": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏塔旁": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏塔上": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏塔群": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏塔有": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏式": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏传佛教": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏区": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "藏羚羊": {
+      "offset": 0,
+      "pinyin": "zang4"
+    },
+    "矿藏": {
+      "offset": 1,
+      "pinyin": "zang4"
+    },
+    "储藏": {
+      "offset": 1,
+      "pinyin": "cang2"
+    },
+    "储藏室": {
+      "offset": 1,
+      "pinyin": "cang2"
+    },
+    "收藏": {
+      "offset": 1,
+      "pinyin": "cang2"
+    },
+    "很长": {
+      "offset": 1,
+      "pinyin": "chang2"
+    },
+    "更长": {
+      "offset": 1,
+      "pinyin": "chang2"
+    },
+    "太长": {
+      "offset": 1,
+      "pinyin": "chang2"
+    },
+    "多长": {
+      "offset": 1,
+      "pinyin": "chang2"
+    },
+    "长时间": {
+      "offset": 0,
+      "pinyin": "chang2"
+    },
+    "长大衣": {
+      "offset": 0,
+      "pinyin": "chang2"
+    },
+    "长杆": {
+      "offset": 0,
+      "pinyin": "chang2"
+    },
+    "长路": {
+      "offset": 0,
+      "pinyin": "chang2"
+    },
+    "路太长": {
+      "offset": 2,
+      "pinyin": "chang2"
+    },
+    "路不长": {
+      "offset": 2,
+      "pinyin": "chang2"
+    },
+    "头发长长了": {
+      "offset": 2,
+      "pinyin": "zhang3"
     }
   },
   "chinese_phrase_policy": {

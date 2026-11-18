@@ -16,7 +16,7 @@ import hashlib,importlib,json,re,unicodedata
 
 PACKAGE_ROOT=Path(__file__).resolve().parents[1]
 RESOURCES=PACKAGE_ROOT/'resources'
-PROFILE_SHA='1054e4793422d3f3ee2fbadf4876c0b46e8cff6e1e00ba5f45dc08f8ea0a63d0'
+PROFILE_SHA='25e7b554f6e3ec07c64fe2c53b169c3e2ea5dc57a851312c66e0d66f9225879f'
 class NumericNormalizationError(ValueError):pass
 def _sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 @lru_cache(maxsize=1)

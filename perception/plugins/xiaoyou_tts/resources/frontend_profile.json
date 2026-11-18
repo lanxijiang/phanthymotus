@@ -1,5 +1,5 @@
 {
-  "kind": "private_xiaoyou_business_lexicon_candidate_20261117",
+  "kind": "xiaoyou_contextual_polyphone_candidate_20261118",
   "source_student_profile_sha256": "4c8e1a4a9e0c57162528b0a3edc0964468a9ecc053bf405957e11fc4ef576549",
   "source_files": {
     "frontend/phonemizer.py": {
@@ -12,18 +12,18 @@
       "profile_sha256": "35535c52a0a6edb49fce6a272c82f6772fc2e5fd6452c5dbb8166be3c7f6e726"
     },
     "frontend/pronunciation.py": {
-      "profile_sha256": "40531547bca4e6c9e114e314aa63f1fb9dfbc4fc84beb9961eb7ca63868e4232"
+      "profile_sha256": "37f97358f67e9f7d57706640045a0a07b04e4399057953f46e5c2b4a8351ba23"
     },
     "frontend/http_status.py": {
       "profile_sha256": "1e73e9b3e628c66021cf626679717eae35ffcb9cff1e626657c3dd7cd7af1842"
     },
     "resources/terms.json": {
-      "profile_sha256": "fe6d1726d0ada4c122a5c9656bed476a94356567ba2cf7aecfd79b97a533de79"
+      "profile_sha256": "424c489cabc9bfec347aa1f15b9b5886cbd4d227649efe789a06333c01e2981c"
     },
     "frontend/__init__.py": {
       "profile_sha256": "994c535e0e75b35f9c711ae8093a4764134d4128975a5a2b4e2b8262bae699ec"
     }
   },
   "developer_or_training_path_required": false,
-  "parent_profile_sha256": "bd65f675d2f3b383cbbe25ac9e6c48aa196c3dcc77de0ba1b48f75b3eb7c81fa"
+  "parent_profile_sha256": "1054e4793422d3f3ee2fbadf4876c0b46e8cff6e1e00ba5f45dc08f8ea0a63d0"
 }

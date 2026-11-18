@@ -7,7 +7,7 @@
   "source_checkpoint_sha256": "a46bd6826d1074b93bc7a17379966d88005cd248136acd24aab4b6883e689bb0",
   "code_layout": "xiaoyou_tts/frontend-runtime-resources",
   "model_dir": "/models/01yuewen",
-  "runtime_manifest_sha256": "d1874ef89fb40cbbcc1da5abfc96fc84c1f7bf7a392001b459b82e3a4caa5d51",
+  "runtime_manifest_sha256": "3323c1080381cc057770cfba064cbca308143507c41d165bcb261b305b661973",
   "english_model": {
     "bytes": 12806118,
     "file": "frontend/en_core_web_sm-3.8.0-py3-none-any.whl",
@@ -28,7 +28,7 @@
   "private_local_only": false,
   "quality_review_pending": true,
   "status": "published_Darvin_evaluation_candidate_three_instance_timing_pending",
-  "note": "Fixed public evaluation resource, anonymously SHA-verified. Single-instance JP6 transport/timing checked; new three-instance timing and Darvin acceptance remain unverified.",
+  "note": "Fixed evaluation resource with contextual polyphone changes and completed CPU frontend/session regression. New JP6 and Darvin measurements are pending.",
   "release_acceptance": {
     "frontend_accepted": false,
     "audio_quality_accepted": false,
@@ -39,8 +39,8 @@
     "darvin_passed": false
   },
   "modelscope_repo": "lanxijiang/xiaoyou01",
-  "modelscope_revision": "91280d58883f8959e57e0d60053d852c8a7f9e6c",
-  "modelscope_file": "01yuewen-jp6-fp32-lexicon-26523-20261117-v1.tar.gz",
-  "asset_bytes": 320593706,
-  "asset_sha256": "20774fb3cf69a043685517225772ed29f50e2ecc3cdda05b29fd321a4ccee6fe"
+  "modelscope_revision": "f5d5774081a5581e1876751cc4bb75872db776ae",
+  "modelscope_file": "01yuewen-jp6-fp32-polyphones-26523-20261118-v1.tar.gz",
+  "asset_bytes": 325615747,
+  "asset_sha256": "a61f6c54761e31ced189ab025d0371b8866bb6cb3308dbf75208e06ba16ba184"
 }
